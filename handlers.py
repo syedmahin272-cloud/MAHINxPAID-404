@@ -28,7 +28,7 @@ def get_bot_instance():
 ADMIN_ID = 7266067201
 COLOMBIA_ID = 33
 TG_SERVICE = "tg"
-MAX_PRICE = 0.1428
+MAX_PRICE = 0.145
 
 MENU_BUTTONS = [
     "Buy Telegram Number",
