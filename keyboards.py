@@ -19,6 +19,7 @@ def main_reply_menu() -> ReplyKeyboardMarkup:
 def admin_reply_menu(restock_on: bool = True) -> ReplyKeyboardMarkup:
     restock_label = "🔔 Restock Alert: ON" if restock_on else "🔕 Restock Alert: OFF"
     b = ReplyKeyboardBuilder()
+    b.button(text="📦 Check Live Stock")
     b.button(text="📊 Users & OTP Monitor")
     b.button(text="👥 Live Active Users")
     b.button(text="📢 Broadcast Message")
@@ -28,8 +29,15 @@ def admin_reply_menu(restock_on: bool = True) -> ReplyKeyboardMarkup:
     b.button(text=restock_label)
     b.button(text="⚙️ Toggle Maintenance")
     b.button(text="⬅️ Back to User Menu")
-    b.adjust(2, 2, 2, 2, 1)
+    b.adjust(1, 2, 2, 2, 2, 1)
     return b.as_markup(resize_keyboard=True)
+
+
+def stock_broadcast_menu() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="📢 Broadcast this Alert to All Users", callback_data="broadcast_live_stock")
+    b.adjust(1)
+    return b.as_markup()
 
 
 def profile_menu() -> InlineKeyboardMarkup:
@@ -74,11 +82,11 @@ def otp_copy_menu(otp_code: str) -> InlineKeyboardMarkup:
         from aiogram.types import CopyTextButton
         b.row(
             InlineKeyboardButton(
-                text=f"Copy OTP: {otp_code}", copy_text=CopyTextButton(text=str(otp_code))
+                text="Copy OTP", copy_text=CopyTextButton(text=str(otp_code))
             )
         )
     except ImportError:
-        b.button(text=f"Copy OTP: {otp_code}", callback_data="noop")
+        b.button(text="Copy OTP", callback_data="noop")
     return b.as_markup()
 
 
