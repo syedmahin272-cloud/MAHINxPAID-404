@@ -37,6 +37,7 @@ MENU_BUTTONS = [
     "Active Numbers",
     "Balance",
     "Profile",
+    "📦 Check Live Stock",
     "📊 Users & OTP Monitor",
     "👥 Live Active Users",
     "📢 Broadcast Message",
@@ -45,19 +46,19 @@ MENU_BUTTONS = [
     "⏳ Extend User Subscription",
     "🔔 Restock Alert: ON",
     "🔕 Restock Alert: OFF",
-    "⚙️ Toggle Maintenance",
+    "⚙️️ Toggle Maintenance",
     "⚙ Toggle Maintenance",
     "⬅️ Back to User Menu"
 ]
 
-# --- In-Memory Speed Cache (0ms Instant Response) ---
+# --- In-Memory Speed Cache ---
 USER_CACHE = {}
 SETTINGS_CACHE = {}
 last_known_stocks = {}
+LATEST_STOCK_REPORT = ""
 
 
 async def get_cached_user(user_id: int):
-    """Supabase-e barbar na giye RAM theke instantly data return kore"""
     if user_id in USER_CACHE:
         return USER_CACHE[user_id]
     user = await db.get_user(user_id)
@@ -67,7 +68,6 @@ async def get_cached_user(user_id: int):
 
 
 def invalidate_user_cache(user_id: int):
-    """User status/key update hole RAM cache clear kore"""
     USER_CACHE.pop(user_id, None)
 
 
@@ -94,7 +94,7 @@ async def auto_cancel_bad_number_worker(client: HeroSMSClient, aid: str, phone: 
             if bot:
                 await bot.send_message(
                     user_id,
-                    f"♻️ <b>Refund Alert:</b> Number <code>+{phone}</code> was occupied/banned and has been auto-cancelled. HeroSMS balance refunded.",
+                    f"♻️ <b>Refund Alert:</b> Number <code>+{phone}</code> was cancelled. Balance refunded.",
                     parse_mode="HTML"
                 )
     except Exception as e:
@@ -147,27 +147,6 @@ async def start_restock_monitor():
         await asyncio.sleep(60)
 
 
-def format_tg_status(raw_status: any) -> tuple:
-    if raw_status is None:
-        return "⚠️ Check Failed", False
-
-    st = str(raw_status.get("status") if isinstance(raw_status, dict) else raw_status).strip().lower()
-    if any(w in st for w in ["unoccupied", "unregistered", "not_registered", "free", "fresh", "available", "false", "0"]):
-        if "banned" in st and not any(neg in st for neg in ["not", "un", "no", "non", "false"]):
-            return "🚫 Banned", False
-        return "✅ Fresh", True
-
-    if any(w in st for w in ["flood", "locked", "lock", "wait", "restricted", "2fa"]):
-        return "🔒 Locked", False
-    if any(w in st for w in ["occupied", "registered", "taken", "used", "true", "1"]):
-        return "❌ Registered", False
-    if "banned" in st or "ban" in st:
-        return "🚫 Banned", False
-
-    clean = re.sub(r'phone_number_', '', st, flags=re.IGNORECASE).replace('_', ' ').strip().title()
-    return f"⚠ {clean}", False
-
-
 async def is_allowed(user_id: int) -> bool:
     if user_id == ADMIN_ID:
         return True
@@ -215,17 +194,17 @@ async def handle_herosms_webhook(request):
             user_id = row["user_id"]
             phone = row["phone"]
             msg_id = row["message_id"]
-            text = f"🇨🇴 <b>Telegram Number:</b> <code>+{phone}</code>\n💬 <b>OTP Code:</b> <code>{code}</code>"
+            text = f"Number: +{phone}\nOTP: {code}"
             bot = get_bot_instance()
             if bot:
                 try:
                     if msg_id:
                         await bot.edit_message_text(
                             text=text, chat_id=user_id, message_id=msg_id,
-                            reply_markup=kb.otp_copy_menu(code), parse_mode="HTML"
+                            reply_markup=kb.otp_copy_menu(code)
                         )
                     else:
-                        await bot.send_message(user_id, text, reply_markup=kb.otp_copy_menu(code), parse_mode="HTML")
+                        await bot.send_message(user_id, text, reply_markup=kb.otp_copy_menu(code))
 
                     await db.increment_user_stats(user_id, otps=1)
                     user = await get_cached_user(user_id)
@@ -251,15 +230,15 @@ async def poll_sms(bot, chat_id: int, activation_id: str, phone: str, client: He
             if isinstance(res, str):
                 if res.startswith("STATUS_OK:"):
                     code = res.split(":", 1)[1]
-                    text = f"🇨🇴 <b>Telegram Number:</b> <code>+{phone}</code>\n💬 <b>OTP Code:</b> <code>{code}</code>"
+                    text = f"Number: +{phone}\nOTP: {code}"
                     msg_id = row["message_id"]
                     if msg_id:
                         await bot.edit_message_text(
                             text=text, chat_id=chat_id, message_id=msg_id,
-                            reply_markup=kb.otp_copy_menu(code), parse_mode="HTML"
+                            reply_markup=kb.otp_copy_menu(code)
                         )
                     else:
-                        await bot.send_message(chat_id, text, reply_markup=kb.otp_copy_menu(code), parse_mode="HTML")
+                        await bot.send_message(chat_id, text, reply_markup=kb.otp_copy_menu(code))
 
                     await db.increment_user_stats(chat_id, otps=1)
                     await client.set_status(activation_id, 6)
@@ -463,7 +442,7 @@ async def text_balance(message: Message):
             await message.answer("❌ Error fetching balance.")
 
 
-# --- Number Purchase Engine with Typing Action ---
+# --- Number Purchase Engine (Clean Look) ---
 async def buy_single_number_process(bot, user_id: int, chat_id: int, service: str, country_id: int, client: HeroSMSClient):
     async with ChatActionSender.typing(bot=bot, chat_id=chat_id):
         res = await client.get_number(service=service, country=country_id, max_price=MAX_PRICE)
@@ -477,21 +456,18 @@ async def buy_single_number_process(bot, user_id: int, chat_id: int, service: st
 
         await db.increment_user_stats(user_id, purchased=1)
         check_res = await check_telegram_numbers([phone])
-        badge, is_fresh = format_tg_status(check_res.get(f"+{phone}") or check_res.get(phone))
-
-        bal = await client.get_balance()
-        bal_alert = "\n⚠️ <i>Low HeroSMS Balance (<$0.50)!</i>" if (bal is not None and bal < 0.50) else ""
+        raw_status = str(check_res.get(f"+{phone}") or check_res.get(phone) or "").lower()
+        is_bad = any(x in raw_status for x in ["registered", "banned", "true", "occupied"])
 
         msg = await bot.send_message(
             chat_id,
-            f"🇨🇴 <b>Number:</b> <code>+{phone}</code> — <b>{badge}</b>\n💬 <b>OTP:</b> Waiting for SMS...{bal_alert}",
-            reply_markup=kb.number_action_menu(aid),
-            parse_mode="HTML"
+            f"Number: +{phone}\nOTP: Waiting for SMS...",
+            reply_markup=kb.number_action_menu(aid)
         )
 
         await db.save_activation(aid, user_id, phone, msg.message_id)
 
-        if not is_fresh and any(x in badge for x in ["Registered", "Banned"]):
+        if is_bad:
             asyncio.create_task(auto_cancel_bad_number_worker(client, aid, phone, user_id))
         else:
             asyncio.create_task(poll_sms(bot, chat_id, aid, phone, client))
@@ -515,9 +491,8 @@ async def cb_refresh_sms(callback: CallbackQuery):
                 row = await db.get_activation(aid)
                 phone = row["phone"] if row else "Unknown"
                 await callback.message.edit_text(
-                    f"🇨🇴 <b>Number:</b> <code>+{phone}</code>\n💬 <b>OTP:</b> <code>{code}</code>",
-                    reply_markup=kb.otp_copy_menu(code),
-                    parse_mode="HTML"
+                    f"Number: +{phone}\nOTP: {code}",
+                    reply_markup=kb.otp_copy_menu(code)
                 )
                 await db.increment_user_stats(callback.from_user.id, otps=1)
                 await client.set_status(aid, 6)
@@ -672,7 +647,7 @@ async def cb_active_cancel(callback: CallbackQuery):
         await callback.answer("Failed to cancel.", show_alert=True)
 
 
-# --- Admin Panel & Control ---
+# --- Admin Panel & Live Stock Controls ---
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
     if message.from_user.id != ADMIN_ID:
@@ -690,6 +665,79 @@ async def back_to_user_menu(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
     await message.answer("🔄 Switched back to User Menu:", reply_markup=kb.main_reply_menu())
+
+
+# --- Live Stock Check & Manual Broadcast ---
+@router.message(F.text == "📦 Check Live Stock")
+async def admin_check_live_stock(message: Message):
+    global LATEST_STOCK_REPORT
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    admin_user = await get_cached_user(ADMIN_ID)
+    if not admin_user or not admin_user.get("api_key"):
+        return await message.answer("⚠️ Admin API Key is not set! Set your key using /start or Profile first.")
+
+    async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
+        client = HeroSMSClient(admin_user["api_key"])
+        prices_res = await client.get_prices(country=COLOMBIA_ID, service=TG_SERVICE)
+
+        if not isinstance(prices_res, dict):
+            return await message.answer("❌ Failed to fetch prices from HeroSMS API.")
+
+        c_dict = prices_res.get(str(COLOMBIA_ID), {}).get(TG_SERVICE, {})
+        if not c_dict:
+            return await message.answer("ℹ️ No operator data available for Colombia Telegram.")
+
+        lines = ["🇨🇴 <b>Live Colombia Telegram Stock:</b>\n"]
+        total_available = 0
+
+        for op, d in c_dict.items():
+            if isinstance(d, dict):
+                count = int(d.get("count", 0))
+                cost = float(d.get("cost", 0.0))
+                total_available += count
+                badge = "🟢" if count > 0 else "🔴"
+                lines.append(f"{badge} <b>{op.upper()}</b>: <b>{count} pcs</b> | Rate: <code>${cost:.3f}</code>")
+
+        lines.append(f"\n📦 <b>Total Stock:</b> <code>{total_available} numbers</code>")
+        report_text = "\n".join(lines)
+        LATEST_STOCK_REPORT = report_text
+
+        await message.answer(report_text, reply_markup=kb.stock_broadcast_menu(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "broadcast_live_stock")
+async def cb_broadcast_live_stock(callback: CallbackQuery):
+    global LATEST_STOCK_REPORT
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("Unauthorized", show_alert=True)
+
+    if not LATEST_STOCK_REPORT:
+        return await callback.answer("No stock report available to broadcast.", show_alert=True)
+
+    users = await db.get_approved_users()
+    if not users:
+        return await callback.answer("No approved users found.", show_alert=True)
+
+    await callback.answer("Broadcasting stock alert to users...", show_alert=False)
+
+    msg_to_send = (
+        f"🚨 <b>LIVE STOCK UPDATE!</b>\n\n"
+        f"{LATEST_STOCK_REPORT}\n\n"
+        f"💡 <i>Go to 'Bulk Buy Numbers' to purchase now!</i>"
+    )
+
+    sent = 0
+    for u in users:
+        try:
+            await callback.bot.send_message(u["user_id"], msg_to_send, parse_mode="HTML")
+            sent += 1
+            await asyncio.sleep(0.04)
+        except Exception:
+            pass
+
+    await callback.message.reply(f"✅ Stock alert broadcasted to <b>{sent}</b> active users!", parse_mode="HTML")
 
 
 @router.message(F.text.startswith("🔔 Restock Alert") | F.text.startswith("🔕 Restock Alert"))
