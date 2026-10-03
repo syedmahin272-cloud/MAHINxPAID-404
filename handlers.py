@@ -224,17 +224,22 @@ async def handle_herosms_webhook(request):
             user_id = row["user_id"]
             phone = row["phone"]
             msg_id = row["message_id"]
-            text = f"Number: +{phone}\nOTP: {code}"
+            text = f"Number: <code>+{phone}</code>\nOTP: <code>{code}</code>"
             bot = get_bot_instance()
             if bot:
                 try:
                     if msg_id:
                         await bot.edit_message_text(
                             text=text, chat_id=user_id, message_id=msg_id,
-                            reply_markup=kb.otp_copy_menu(code)
+                            reply_markup=kb.otp_copy_menu(code),
+                            parse_mode="HTML"
                         )
                     else:
-                        await bot.send_message(user_id, text, reply_markup=kb.otp_copy_menu(code))
+                        await bot.send_message(
+                            user_id, text,
+                            reply_markup=kb.otp_copy_menu(code),
+                            parse_mode="HTML"
+                        )
 
                     await db.increment_user_stats(user_id, otps=1)
                     user = await get_cached_user(user_id)
@@ -260,15 +265,20 @@ async def poll_sms(bot, chat_id: int, activation_id: str, phone: str, client: He
             if isinstance(res, str):
                 if res.startswith("STATUS_OK:"):
                     code = res.split(":", 1)[1]
-                    text = f"Number: +{phone}\nOTP: {code}"
+                    text = f"Number: <code>+{phone}</code>\nOTP: <code>{code}</code>"
                     msg_id = row["message_id"]
                     if msg_id:
                         await bot.edit_message_text(
                             text=text, chat_id=chat_id, message_id=msg_id,
-                            reply_markup=kb.otp_copy_menu(code)
+                            reply_markup=kb.otp_copy_menu(code),
+                            parse_mode="HTML"
                         )
                     else:
-                        await bot.send_message(chat_id, text, reply_markup=kb.otp_copy_menu(code))
+                        await bot.send_message(
+                            chat_id, text,
+                            reply_markup=kb.otp_copy_menu(code),
+                            parse_mode="HTML"
+                        )
 
                     await db.increment_user_stats(chat_id, otps=1)
                     await client.set_status(activation_id, 6)
@@ -466,13 +476,13 @@ async def text_balance(message: Message):
         client = HeroSMSClient(user["api_key"])
         balance = await client.get_balance()
         if balance is not None:
-            alert = "\n⚠️️ <b>Warning:</b> Balance is below $0.50! Please recharge." if balance < 0.50 else ""
+            alert = "\n⚠️ <b>Warning:</b> Balance is below $0.50! Please recharge." if balance < 0.50 else ""
             await message.answer(f"💰 Balance: <code>{balance:.4f} USD</code>{alert}", parse_mode="HTML")
         else:
             await message.answer("❌ Error fetching balance.")
 
 
-# --- Number Purchase Engine (Active Checker + Clean Output) ---
+# --- Number Purchase Engine (Active Checker + Monospace Tap-to-Copy) ---
 async def buy_single_number_process(bot, user_id: int, chat_id: int, service: str, country_id: int, client: HeroSMSClient):
     try:
         res = await asyncio.wait_for(
@@ -521,8 +531,9 @@ async def buy_single_number_process(bot, user_id: int, chat_id: int, service: st
 
     msg = await bot.send_message(
         chat_id,
-        f"Number: +{phone} {status_emoji}\nOTP: Waiting for SMS...",
-        reply_markup=kb.number_action_menu(aid)
+        f"Number: <code>+{phone}</code> {status_emoji}\nOTP: Waiting for SMS...",
+        reply_markup=kb.number_action_menu(aid),
+        parse_mode="HTML"
     )
 
     await db.save_activation(aid, user_id, phone, msg.message_id)
@@ -552,8 +563,9 @@ async def cb_refresh_sms(callback: CallbackQuery):
                 row = await db.get_activation(aid)
                 phone = row["phone"] if row else "Unknown"
                 await callback.message.edit_text(
-                    f"Number: +{phone}\nOTP: {code}",
-                    reply_markup=kb.otp_copy_menu(code)
+                    f"Number: <code>+{phone}</code>\nOTP: <code>{code}</code>",
+                    reply_markup=kb.otp_copy_menu(code),
+                    parse_mode="HTML"
                 )
                 await db.increment_user_stats(callback.from_user.id, otps=1)
                 await client.set_status(aid, 6)
@@ -857,7 +869,7 @@ async def admin_monitor_users(message: Message):
     async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
         users = await db.get_approved_users()
         if not users:
-            return await message.answer("ℹ️️ No approved users found.")
+            return await message.answer("ℹ️ No approved users found.")
 
         lines = [f"📊 <b>Approved Users Monitoring ({len(users)}):</b>\n"]
         for idx, u in enumerate(users, 1):
