@@ -46,12 +46,12 @@ MENU_BUTTONS = [
     "⏳ Extend User Subscription",
     "🔔 Restock Alert: ON",
     "🔕 Restock Alert: OFF",
-    "⚙️️ Toggle Maintenance",
+    "⚙️ Toggle Maintenance",
     "⚙ Toggle Maintenance",
     "⬅️ Back to User Menu"
 ]
 
-# --- In-Memory Speed Cache ---
+# --- In-Memory Speed Cache (0ms Ping) ---
 USER_CACHE = {}
 SETTINGS_CACHE = {}
 last_known_stocks = {}
@@ -112,36 +112,45 @@ async def start_restock_monitor():
                 if admin_user and admin_user.get("api_key"):
                     client = HeroSMSClient(admin_user["api_key"])
                     prices_res = await client.get_prices(country=COLOMBIA_ID, service=TG_SERVICE)
+                    
                     if isinstance(prices_res, dict):
-                        c_dict = prices_res.get(str(COLOMBIA_ID), {}).get(TG_SERVICE, {})
-                        for op, d in c_dict.items():
-                            if isinstance(d, dict):
-                                count = int(d.get("count", 0))
-                                cost = float(d.get("cost", 0.0))
-                                prev_count = last_known_stocks.get(op, 0)
-                                
-                                is_initial_stock = first_run and count >= 5
-                                is_stock_increased = (count - prev_count) >= 5
-                                
-                                if (is_initial_stock or is_stock_increased) and cost <= 0.145:
-                                    approved = await db.get_approved_users()
-                                    bot = get_bot_instance()
-                                    if bot:
-                                        msg_text = (
-                                            f"🚨 <b>RESTOCK ALERT!</b>\n\n"
-                                            f"📡 Operator: <b>{op.upper()}</b>\n"
-                                            f"💵 Price: <b>${cost:.3f}</b>\n"
-                                            f"📦 Available Stock: <b>{count} numbers</b>\n\n"
-                                            f"💡 Grab now from <b>Bulk Buy Numbers</b>!"
-                                        )
-                                        for u in approved:
-                                            try:
-                                                await bot.send_message(u["user_id"], msg_text, parse_mode="HTML")
-                                                await asyncio.sleep(0.04)
-                                            except Exception:
-                                                pass
-                                last_known_stocks[op] = count
-                        first_run = False
+                        c_dict = {}
+                        if str(COLOMBIA_ID) in prices_res:
+                            c_dict = prices_res[str(COLOMBIA_ID)].get(TG_SERVICE, {})
+                        elif TG_SERVICE in prices_res:
+                            c_dict = prices_res[TG_SERVICE]
+                        else:
+                            c_dict = prices_res
+
+                        if isinstance(c_dict, dict):
+                            for op, d in c_dict.items():
+                                if isinstance(d, dict):
+                                    cnt = int(d.get("count", d.get("amount", 0)))
+                                    prc = float(d.get("cost", d.get("price", 0.0)))
+                                    prev_count = last_known_stocks.get(op, 0)
+
+                                    is_initial_stock = first_run and cnt >= 5
+                                    is_stock_increased = (cnt - prev_count) >= 5
+
+                                    if (is_initial_stock or is_stock_increased) and prc <= 0.145:
+                                        approved = await db.get_approved_users()
+                                        bot = get_bot_instance()
+                                        if bot:
+                                            msg_text = (
+                                                f"🚨 <b>RESTOCK ALERT!</b>\n\n"
+                                                f"📡 Operator: <b>{op.upper()}</b>\n"
+                                                f"💵 Price: <b>${prc:.3f}</b>\n"
+                                                f"📦 Available Stock: <b>{cnt} numbers</b>\n\n"
+                                                f"💡 Grab now from <b>Bulk Buy Numbers</b>!"
+                                            )
+                                            for u in approved:
+                                                try:
+                                                    await bot.send_message(u["user_id"], msg_text, parse_mode="HTML")
+                                                    await asyncio.sleep(0.04)
+                                                except Exception:
+                                                    pass
+                                    last_known_stocks[op] = cnt
+                            first_run = False
         except Exception as e:
             logging.error(f"Restock monitor error: {e}")
         await asyncio.sleep(60)
@@ -442,7 +451,7 @@ async def text_balance(message: Message):
             await message.answer("❌ Error fetching balance.")
 
 
-# --- Number Purchase Engine (Clean Look) ---
+# --- Number Purchase Engine (Clean Look like Photo 2) ---
 async def buy_single_number_process(bot, user_id: int, chat_id: int, service: str, country_id: int, client: HeroSMSClient):
     async with ChatActionSender.typing(bot=bot, chat_id=chat_id):
         res = await client.get_number(service=service, country=country_id, max_price=MAX_PRICE)
@@ -459,6 +468,7 @@ async def buy_single_number_process(bot, user_id: int, chat_id: int, service: st
         raw_status = str(check_res.get(f"+{phone}") or check_res.get(phone) or "").lower()
         is_bad = any(x in raw_status for x in ["registered", "banned", "true", "occupied"])
 
+        # Clean display matching Photo 2
         msg = await bot.send_message(
             chat_id,
             f"Number: +{phone}\nOTP: Waiting for SMS...",
@@ -660,7 +670,7 @@ async def cmd_admin(message: Message):
     )
 
 
-@router.message(F.text == "⬅️ Back to User Menu")
+@router.message(F.text == "⬅️️ Back to User Menu")
 async def back_to_user_menu(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
@@ -685,20 +695,41 @@ async def admin_check_live_stock(message: Message):
         if not isinstance(prices_res, dict):
             return await message.answer("❌ Failed to fetch prices from HeroSMS API.")
 
-        c_dict = prices_res.get(str(COLOMBIA_ID), {}).get(TG_SERVICE, {})
-        if not c_dict:
-            return await message.answer("ℹ️ No operator data available for Colombia Telegram.")
+        # Parsing: Nested check
+        c_dict = {}
+        if str(COLOMBIA_ID) in prices_res:
+            c_dict = prices_res[str(COLOMBIA_ID)].get(TG_SERVICE, {})
+        elif TG_SERVICE in prices_res:
+            c_dict = prices_res[TG_SERVICE]
+        else:
+            c_dict = prices_res
+
+        common_ops = ["claro", "movistar", "tigo", "wom", "virgin", "exito", "flash"]
+        found_ops = {}
+
+        if isinstance(c_dict, dict):
+            for op_name, op_val in c_dict.items():
+                if isinstance(op_val, dict):
+                    cnt = int(op_val.get("count", op_val.get("amount", 0)))
+                    prc = float(op_val.get("cost", op_val.get("price", 0.0)))
+                    found_ops[op_name.lower()] = {"count": cnt, "cost": prc}
 
         lines = ["🇨🇴 <b>Live Colombia Telegram Stock:</b>\n"]
         total_available = 0
 
-        for op, d in c_dict.items():
-            if isinstance(d, dict):
-                count = int(d.get("count", 0))
-                cost = float(d.get("cost", 0.0))
-                total_available += count
-                badge = "🟢" if count > 0 else "🔴"
-                lines.append(f"{badge} <b>{op.upper()}</b>: <b>{count} pcs</b> | Rate: <code>${cost:.3f}</code>")
+        # Detected operators
+        for op, data in found_ops.items():
+            cnt = data["count"]
+            cost = data["cost"]
+            total_available += cnt
+            badge = "🟢" if cnt > 0 else "🔴"
+            cost_str = f"${cost:.3f}" if cost > 0 else "N/A"
+            lines.append(f"{badge} <b>{op.upper()}</b>: <b>{cnt} pcs</b> | Rate: <code>{cost_str}</code>")
+
+        # 0 Stock omitted operators
+        for op in common_ops:
+            if op not in found_ops:
+                lines.append(f"🔴 <b>{op.upper()}</b>: <b>0 pcs</b> | Rate: <code>Out of stock</code>")
 
         lines.append(f"\n📦 <b>Total Stock:</b> <code>{total_available} numbers</code>")
         report_text = "\n".join(lines)
