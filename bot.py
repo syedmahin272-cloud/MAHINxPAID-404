@@ -16,7 +16,7 @@ from handlers import (
     start_restock_monitor,
 )
 
-TOKEN = os.getenv("BOT_TOKEN", "8777144266:AAHbAt6kTZWdEzJY8fhQ3pfDTmqa4gjTT2s")
+TOKEN = os.getenv("BOT_TOKEN", "8777144266:AAFoiO4YsT7_biSnUJEHyT1M8qFMJungyug")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
