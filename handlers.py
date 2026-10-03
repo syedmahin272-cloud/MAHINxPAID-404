@@ -102,7 +102,8 @@ async def auto_cancel_bad_number_worker(client: HeroSMSClient, aid: str, phone: 
 
 
 async def start_restock_monitor():
-    await asyncio.sleep(20)
+    await asyncio.sleep(15)
+    first_run = True
     while True:
         try:
             is_enabled = await get_cached_setting("restock_monitor")
@@ -110,7 +111,7 @@ async def start_restock_monitor():
                 admin_user = await get_cached_user(ADMIN_ID)
                 if admin_user and admin_user.get("api_key"):
                     client = HeroSMSClient(admin_user["api_key"])
-                    prices_res = await client.get_prices(country=COLOMBIA_ID, service=TG_SERVICE)[cite: 5]
+                    prices_res = await client.get_prices(country=COLOMBIA_ID, service=TG_SERVICE)
                     if isinstance(prices_res, dict):
                         c_dict = prices_res.get(str(COLOMBIA_ID), {}).get(TG_SERVICE, {})
                         for op, d in c_dict.items():
@@ -118,7 +119,12 @@ async def start_restock_monitor():
                                 count = int(d.get("count", 0))
                                 cost = float(d.get("cost", 0.0))
                                 prev_count = last_known_stocks.get(op, 0)
-                                if prev_count == 0 and count >= 5 and cost <= 0.145:
+                                
+                                # Stock barle (5+ jog hole) ba prothom run-e 5+ thakle alert trigger hobe
+                                is_initial_stock = first_run and count >= 5
+                                is_stock_increased = (count - prev_count) >= 5
+                                
+                                if (is_initial_stock or is_stock_increased) and cost <= 0.145:
                                     approved = await db.get_approved_users()
                                     bot = get_bot_instance()
                                     if bot:
@@ -136,9 +142,10 @@ async def start_restock_monitor():
                                             except Exception:
                                                 pass
                                 last_known_stocks[op] = count
+                        first_run = False
         except Exception as e:
             logging.error(f"Restock monitor error: {e}")
-        await asyncio.sleep(90)
+        await asyncio.sleep(60)
 
 
 def format_tg_status(raw_status: any) -> tuple:
@@ -766,8 +773,8 @@ async def admin_live_active_users(message: Message):
                         days_left = delta.days
                         hours_left = delta.seconds // 3600
                         active_list.append((u, f"{days_left}d {hours_left}h remaining"))
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
         if not active_list:
             return await message.answer("ℹ️ Currently no users have active valid subscriptions.")
