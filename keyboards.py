@@ -1,14 +1,12 @@
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
     ReplyKeyboardMarkup,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 
 def main_reply_menu() -> ReplyKeyboardMarkup:
-    """User-er normal reply menu (Single buy o support shorano)"""
     b = ReplyKeyboardBuilder()
     b.button(text="Bulk Buy Numbers")
     b.button(text="Active Numbers")
@@ -19,10 +17,10 @@ def main_reply_menu() -> ReplyKeyboardMarkup:
 
 
 def admin_reply_menu(restock_on: bool = True) -> ReplyKeyboardMarkup:
-    """Admin /admin dile nicher menu change hoye full control ashbe"""
     restock_label = "🔔 Restock Alert: ON" if restock_on else "🔕 Restock Alert: OFF"
     b = ReplyKeyboardBuilder()
     b.button(text="📊 Users & OTP Monitor")
+    b.button(text="👥 Live Active Users")
     b.button(text="📢 Broadcast Message")
     b.button(text="🚫 Ban / Unban User")
     b.button(text="❌ Unapprove / Revoke Access")
@@ -30,7 +28,7 @@ def admin_reply_menu(restock_on: bool = True) -> ReplyKeyboardMarkup:
     b.button(text=restock_label)
     b.button(text="⚙️ Toggle Maintenance")
     b.button(text="⬅️ Back to User Menu")
-    b.adjust(2, 2, 2, 1, 1)
+    b.adjust(2, 2, 2, 2, 1)
     return b.as_markup(resize_keyboard=True)
 
 
@@ -85,11 +83,12 @@ def otp_copy_menu(otp_code: str) -> InlineKeyboardMarkup:
 
 
 def approval_duration_menu(user_id: int) -> InlineKeyboardMarkup:
-    """Approval request ashle admin validity select korbe"""
     b = InlineKeyboardBuilder()
+    b.button(text="1 Day", callback_data=f"appr_{user_id}_1")
+    b.button(text="3 Days", callback_data=f"appr_{user_id}_3")
     b.button(text="7 Days", callback_data=f"appr_{user_id}_7")
     b.button(text="30 Days", callback_data=f"appr_{user_id}_30")
     b.button(text="Lifetime", callback_data=f"appr_{user_id}_life")
     b.button(text="❌ Reject", callback_data=f"appr_{user_id}_reject")
-    b.adjust(3, 1)
+    b.adjust(2, 3, 1)
     return b.as_markup()
