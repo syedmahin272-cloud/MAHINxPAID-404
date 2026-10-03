@@ -8,7 +8,13 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 
 import database as db
-from handlers import get_bot_instance, handle_herosms_webhook, router, set_bot_instance
+from handlers import (
+    get_bot_instance,
+    handle_herosms_webhook,
+    router,
+    set_bot_instance,
+    start_restock_monitor,
+)
 
 TOKEN = os.getenv("BOT_TOKEN", "8817221421:AAHEVDiBNmcmfbe15ZNM0IuZdc3u5kPWV6s")
 PORT = int(os.getenv("PORT", 8080))
@@ -17,6 +23,9 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 async def on_startup(bot: Bot):
   await db.init_db()
+  # Background restock watcher launch kora holo
+  asyncio.create_task(start_restock_monitor())
+
   if WEBHOOK_URL:
     await bot.set_webhook(f"{WEBHOOK_URL}/webhook/telegram")
   else:
