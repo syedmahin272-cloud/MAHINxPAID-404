@@ -1,118 +1,118 @@
 import os
-import aiosqlite
+import asyncpg
 from datetime import datetime, timezone, timedelta
 
-DB_PATH = os.getenv("DB_PATH", "database.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+pool = None
+
+async def get_pool():
+    global pool
+    if pool is None:
+        if not DATABASE_URL:
+            raise ValueError("DATABASE_URL environment variable is missing!")
+        # Clean postgresql:// format for asyncpg
+        url = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+        pool = await asyncpg.create_pool(url, min_size=1, max_size=10)
+    return pool
 
 
 async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
+    p = await get_pool()
+    async with p.acquire() as conn:
+        # PostgreSQL schema with auto-creation
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
+                user_id BIGINT PRIMARY KEY,
                 username TEXT,
                 full_name TEXT,
                 api_key TEXT,
-                is_banned INTEGER DEFAULT 0,
-                is_approved INTEGER DEFAULT 0,
+                is_banned INT DEFAULT 0,
+                is_approved INT DEFAULT 0,
                 expiry_date TEXT,
-                total_purchased INTEGER DEFAULT 0,
-                total_otps INTEGER DEFAULT 0,
+                total_purchased INT DEFAULT 0,
+                total_otps INT DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        
-        # Schema migration jodi columns missing thake
-        columns_to_add = [
-            ("username", "TEXT"),
-            ("full_name", "TEXT"),
-            ("is_approved", "INTEGER DEFAULT 0"),
-            ("expiry_date", "TEXT"),
-            ("total_purchased", "INTEGER DEFAULT 0"),
-            ("total_otps", "INTEGER DEFAULT 0")
-        ]
-        for col, col_type in columns_to_add:
-            try:
-                await db.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
-            except Exception:
-                pass
 
-        await db.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
         """)
-        await db.execute("""
+
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS activations (
                 activation_id TEXT PRIMARY KEY,
-                user_id INTEGER,
+                user_id BIGINT,
                 phone TEXT,
-                message_id INTEGER
+                message_id BIGINT
             )
         """)
-        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('maintenance', '0')")
-        await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('restock_monitor', '1')")
-        await db.commit()
+
+        await conn.execute("""
+            INSERT INTO settings (key, value) 
+            VALUES ('maintenance', '0'), ('restock_monitor', '1')
+            ON CONFLICT (key) DO NOTHING
+        """)
 
 
 async def add_user(user_id: int, username: str = None, full_name: str = None, is_approved: int = 0):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
             """INSERT INTO users (user_id, username, full_name, is_approved) 
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(user_id) DO UPDATE SET 
-               username = COALESCE(?, users.username),
-               full_name = COALESCE(?, users.full_name)""",
-            (user_id, username, full_name, is_approved, username, full_name)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (user_id) DO UPDATE SET 
+               username = COALESCE($2, users.username),
+               full_name = COALESCE($3, users.full_name)""",
+            user_id, username, full_name, is_approved
         )
-        await db.commit()
 
 
 async def get_user(user_id: int):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cur:
-            return await cur.fetchone()
+    p = await get_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+        return dict(row) if row else None
 
 
 async def get_all_users():
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT user_id FROM users") as cur:
-            rows = await cur.fetchall()
-            return [r[0] for r in rows]
+    p = await get_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id FROM users")
+        return [r["user_id"] for r in rows]
 
 
 async def get_approved_users():
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM users WHERE is_approved = 1") as cur:
-            return await cur.fetchall()
+    p = await get_pool()
+    async with p.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM users WHERE is_approved = 1")
+        return [dict(r) for r in rows]
 
 
 async def set_user_subscription(user_id: int, days: int = None):
-    """Subscription set ba extend kore (days=None mane Lifetime)"""
-    async with aiosqlite.connect(DB_PATH) as db:
+    p = await get_pool()
+    async with p.acquire() as conn:
         if days is None:
             expiry_str = "LIFETIME"
         else:
             exp_date = datetime.now(timezone.utc) + timedelta(days=days)
             expiry_str = exp_date.strftime("%Y-%m-%d %H:%M:%S")
 
-        await db.execute(
-            "UPDATE users SET is_approved = 1, expiry_date = ? WHERE user_id = ?",
-            (expiry_str, user_id)
+        await conn.execute(
+            "UPDATE users SET is_approved = 1, expiry_date = $1 WHERE user_id = $2",
+            expiry_str, user_id
         )
-        await db.commit()
 
 
 async def extend_user_subscription(user_id: int, extra_days: int):
-    """Current expiry-r shathe extra days jog kore"""
     user = await get_user(user_id)
     if not user:
         return False
     current_exp = user["expiry_date"]
-    
+
     if not current_exp or current_exp == "LIFETIME":
         base_date = datetime.now(timezone.utc)
     else:
@@ -124,81 +124,88 @@ async def extend_user_subscription(user_id: int, extra_days: int):
             base_date = datetime.now(timezone.utc)
 
     new_exp = (base_date + timedelta(days=extra_days)).strftime("%Y-%m-%d %H:%M:%S")
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE users SET is_approved = 1, expiry_date = ? WHERE user_id = ?",
-            (new_exp, user_id)
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET is_approved = 1, expiry_date = $1 WHERE user_id = $2",
+            new_exp, user_id
         )
-        await db.commit()
     return new_exp
 
 
 async def set_approval_status(user_id: int, is_approved: bool):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE users SET is_approved = ? WHERE user_id = ?",
-            (1 if is_approved else 0, user_id)
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET is_approved = $1 WHERE user_id = $2",
+            1 if is_approved else 0, user_id
         )
-        await db.commit()
 
 
 async def increment_user_stats(user_id: int, purchased: int = 0, otps: int = 0):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
             """UPDATE users SET 
-               total_purchased = total_purchased + ?,
-               total_otps = total_otps + ?
-               WHERE user_id = ?""",
-            (purchased, otps, user_id)
+               total_purchased = total_purchased + $1,
+               total_otps = total_otps + $2
+               WHERE user_id = $3""",
+            purchased, otps, user_id
         )
-        await db.commit()
 
 
 async def update_api_key(user_id: int, api_key: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET api_key = ? WHERE user_id = ?", (api_key, user_id))
-        await db.commit()
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute("UPDATE users SET api_key = $1 WHERE user_id = $2", api_key, user_id)
 
 
 async def set_ban_status(user_id: int, is_banned: bool):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE users SET is_banned = ? WHERE user_id = ?",
-            (1 if is_banned else 0, user_id)
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET is_banned = $1 WHERE user_id = $2",
+            1 if is_banned else 0, user_id
         )
-        await db.commit()
 
 
 async def get_setting(key: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT value FROM settings WHERE key = ?", (key,)) as cur:
-            row = await cur.fetchone()
-            return row[0] if row else None
+    p = await get_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow("SELECT value FROM settings WHERE key = $1", key)
+        return row["value"] if row else None
 
 
 async def set_setting(key: str, value: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-        await db.commit()
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO settings (key, value) VALUES ($1, $2)
+               ON CONFLICT (key) DO UPDATE SET value = $2""",
+            key, value
+        )
 
 
 async def save_activation(activation_id: str, user_id: int, phone: str, message_id: int = None):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT OR REPLACE INTO activations (activation_id, user_id, phone, message_id) VALUES (?, ?, ?, ?)",
-            (str(activation_id), user_id, phone, message_id)
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO activations (activation_id, user_id, phone, message_id) 
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (activation_id) DO UPDATE SET 
+               user_id = $2, phone = $3, message_id = $4""",
+            str(activation_id), user_id, phone, message_id
         )
-        await db.commit()
 
 
 async def get_activation(activation_id: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM activations WHERE activation_id = ?", (str(activation_id),)) as cur:
-            return await cur.fetchone()
+    p = await get_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM activations WHERE activation_id = $1", str(activation_id))
+        return dict(row) if row else None
 
 
 async def delete_activation(activation_id: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM activations WHERE activation_id = ?", (str(activation_id),))
-        await db.commit()
+    p = await get_pool()
+    async with p.acquire() as conn:
+        await conn.execute("DELETE FROM activations WHERE activation_id = $1", str(activation_id))
