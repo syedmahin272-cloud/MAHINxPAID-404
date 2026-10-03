@@ -1,18 +1,32 @@
 import os
+import ssl
 import asyncpg
 from datetime import datetime, timezone, timedelta
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 pool = None
 
+
 async def get_pool():
     global pool
     if pool is None:
         if not DATABASE_URL:
             raise ValueError("DATABASE_URL environment variable is missing!")
-        # Clean postgresql:// format for asyncpg
+
+        # Asyncpg-er jonno clean postgresql:// format toiri kora
         url = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
-        pool = await asyncpg.create_pool(url, min_size=1, max_size=10)
+
+        # Supabase Pooler-er IPv4 connection SSL context
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        pool = await asyncpg.create_pool(
+            url,
+            min_size=1,
+            max_size=5,
+            ssl=ctx
+        )
     return pool
 
 
