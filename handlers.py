@@ -51,7 +51,7 @@ MENU_BUTTONS = [
     "⬅️ Back to User Menu"
 ]
 
-# --- In-Memory Speed Cache (0ms Ping) ---
+# --- In-Memory Speed Cache (0ms Latency) ---
 USER_CACHE = {}
 SETTINGS_CACHE = {}
 last_known_stocks = {}
@@ -154,6 +154,27 @@ async def start_restock_monitor():
         except Exception as e:
             logging.error(f"Restock monitor error: {e}")
         await asyncio.sleep(60)
+
+
+def format_tg_status(raw_status: any) -> tuple:
+    if raw_status is None:
+        return "⚠️ Check Failed", False
+
+    st = str(raw_status.get("status") if isinstance(raw_status, dict) else raw_status).strip().lower()
+    if any(w in st for w in ["unoccupied", "unregistered", "not_registered", "free", "fresh", "available", "false", "0"]):
+        if "banned" in st and not any(neg in st for neg in ["not", "un", "no", "non", "false"]):
+            return "🚫 Banned", False
+        return "✅ Fresh", True
+
+    if any(w in st for w in ["flood", "locked", "lock", "wait", "restricted", "2fa"]):
+        return "🔒 Locked", False
+    if any(w in st for w in ["occupied", "registered", "taken", "used", "true", "1"]):
+        return "❌ Registered", False
+    if "banned" in st or "ban" in st:
+        return "🚫 Banned", False
+
+    clean = re.sub(r'phone_number_', '', st, flags=re.IGNORECASE).replace('_', ' ').strip().title()
+    return f"⚠ {clean}", False
 
 
 async def is_allowed(user_id: int) -> bool:
@@ -451,7 +472,7 @@ async def text_balance(message: Message):
             await message.answer("❌ Error fetching balance.")
 
 
-# --- Number Purchase Engine (Clean Look like Photo 2) ---
+# --- Number Purchase Engine (Clean Look + Active Emoji TG Checker) ---
 async def buy_single_number_process(bot, user_id: int, chat_id: int, service: str, country_id: int, client: HeroSMSClient):
     async with ChatActionSender.typing(bot=bot, chat_id=chat_id):
         res = await client.get_number(service=service, country=country_id, max_price=MAX_PRICE)
@@ -464,20 +485,34 @@ async def buy_single_number_process(bot, user_id: int, chat_id: int, service: st
         phone = res.get("phoneNumber", "Unknown")
 
         await db.increment_user_stats(user_id, purchased=1)
+        
+        # --- Live TG Checker ---
         check_res = await check_telegram_numbers([phone])
-        raw_status = str(check_res.get(f"+{phone}") or check_res.get(phone) or "").lower()
-        is_bad = any(x in raw_status for x in ["registered", "banned", "true", "occupied"])
+        badge, is_fresh = format_tg_status(check_res.get(f"+{phone}") or check_res.get(phone))
+        
+        # Select appropriate status emoji
+        if is_fresh:
+            status_emoji = "✅"[cite: 1]
+        elif any(x in badge for x in ["Banned", "Ban"]):
+            status_emoji = "🚫"[cite: 1]
+        elif any(x in badge for x in ["Registered", "Occupied"]):
+            status_emoji = "❌"
+        elif any(x in badge for x in ["Locked", "Flood"]):
+            status_emoji = "🔒"
+        else:
+            status_emoji = "⚠️"
 
-        # Clean display matching Photo 2
+        # Photo 2 style clean formatting with single status emoji
         msg = await bot.send_message(
             chat_id,
-            f"Number: +{phone}\nOTP: Waiting for SMS...",
+            f"Number: +{phone} {status_emoji}\nOTP: Waiting for SMS...",
             reply_markup=kb.number_action_menu(aid)
         )
 
         await db.save_activation(aid, user_id, phone, msg.message_id)
 
-        if is_bad:
+        # Non-fresh numbers get scheduled for auto-refund
+        if not is_fresh and any(x in badge for x in ["Registered", "Banned", "Locked"]):
             asyncio.create_task(auto_cancel_bad_number_worker(client, aid, phone, user_id))
         else:
             asyncio.create_task(poll_sms(bot, chat_id, aid, phone, client))
@@ -597,7 +632,7 @@ async def text_active_numbers(message: Message):
 
         activations = res.get("data", [])
         if not activations:
-            return await message.answer("ℹ️ No active numbers.")
+            return await message.answer("ℹ️️ No active numbers.")
 
         await message.answer(f"Active Numbers ({len(activations)}):", reply_markup=kb.active_numbers_menu(activations))
 
@@ -671,6 +706,7 @@ async def cmd_admin(message: Message):
 
 
 @router.message(F.text == "⬅️️ Back to User Menu")
+@router.message(F.text == "⬅ Back to User Menu")
 async def back_to_user_menu(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
@@ -695,7 +731,6 @@ async def admin_check_live_stock(message: Message):
         if not isinstance(prices_res, dict):
             return await message.answer("❌ Failed to fetch prices from HeroSMS API.")
 
-        # Parsing: Nested check
         c_dict = {}
         if str(COLOMBIA_ID) in prices_res:
             c_dict = prices_res[str(COLOMBIA_ID)].get(TG_SERVICE, {})
@@ -717,7 +752,6 @@ async def admin_check_live_stock(message: Message):
         lines = ["🇨🇴 <b>Live Colombia Telegram Stock:</b>\n"]
         total_available = 0
 
-        # Detected operators
         for op, data in found_ops.items():
             cnt = data["count"]
             cost = data["cost"]
@@ -726,7 +760,6 @@ async def admin_check_live_stock(message: Message):
             cost_str = f"${cost:.3f}" if cost > 0 else "N/A"
             lines.append(f"{badge} <b>{op.upper()}</b>: <b>{cnt} pcs</b> | Rate: <code>{cost_str}</code>")
 
-        # 0 Stock omitted operators
         for op in common_ops:
             if op not in found_ops:
                 lines.append(f"🔴 <b>{op.upper()}</b>: <b>0 pcs</b> | Rate: <code>Out of stock</code>")
@@ -855,7 +888,7 @@ async def admin_live_active_users(message: Message):
                     pass
 
         if not active_list:
-            return await message.answer("ℹ️ Currently no users have active valid subscriptions.")
+            return await message.answer("ℹ️️ Currently no users have active valid subscriptions.")
 
         lines = [f"👥 <b>Live Active Users ({len(active_list)}):</b>\n"]
         for idx, (u, time_left) in enumerate(active_list, 1):
