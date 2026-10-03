@@ -120,7 +120,6 @@ async def start_restock_monitor():
                                 cost = float(d.get("cost", 0.0))
                                 prev_count = last_known_stocks.get(op, 0)
                                 
-                                # Stock barle (5+ jog hole) ba prothom run-e 5+ thakle alert trigger hobe
                                 is_initial_stock = first_run and count >= 5
                                 is_stock_increased = (count - prev_count) >= 5
                                 
@@ -773,8 +772,8 @@ async def admin_live_active_users(message: Message):
                         days_left = delta.days
                         hours_left = delta.seconds // 3600
                         active_list.append((u, f"{days_left}d {hours_left}h remaining"))
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
         if not active_list:
             return await message.answer("ℹ️ Currently no users have active valid subscriptions.")
