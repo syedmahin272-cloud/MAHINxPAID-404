@@ -466,58 +466,74 @@ async def text_balance(message: Message):
         client = HeroSMSClient(user["api_key"])
         balance = await client.get_balance()
         if balance is not None:
-            alert = "\n⚠️ <b>Warning:</b> Balance is below $0.50! Please recharge." if balance < 0.50 else ""
+            alert = "\n⚠️️ <b>Warning:</b> Balance is below $0.50! Please recharge." if balance < 0.50 else ""
             await message.answer(f"💰 Balance: <code>{balance:.4f} USD</code>{alert}", parse_mode="HTML")
         else:
             await message.answer("❌ Error fetching balance.")
 
 
-# --- Number Purchase Engine (Clean Look + Active Emoji TG Checker) ---
+# --- Number Purchase Engine (Active Checker + Clean Output) ---
 async def buy_single_number_process(bot, user_id: int, chat_id: int, service: str, country_id: int, client: HeroSMSClient):
-    async with ChatActionSender.typing(bot=bot, chat_id=chat_id):
-        res = await client.get_number(service=service, country=country_id, max_price=MAX_PRICE)
-        if not isinstance(res, dict) or "activationId" not in res:
-            err = res.get("title", str(res)) if isinstance(res, dict) else str(res)
-            await bot.send_message(chat_id, f"Failed to buy number: {html.escape(err)}")
-            return False
-
-        aid = str(res["activationId"])
-        phone = res.get("phoneNumber", "Unknown")
-
-        await db.increment_user_stats(user_id, purchased=1)
-        
-        # --- Live TG Checker ---
-        check_res = await check_telegram_numbers([phone])
-        badge, is_fresh = format_tg_status(check_res.get(f"+{phone}") or check_res.get(phone))
-        
-        # Select appropriate status emoji
-        if is_fresh:
-            status_emoji = "✅"[cite: 1]
-        elif any(x in badge for x in ["Banned", "Ban"]):
-            status_emoji = "🚫"[cite: 1]
-        elif any(x in badge for x in ["Registered", "Occupied"]):
-            status_emoji = "❌"
-        elif any(x in badge for x in ["Locked", "Flood"]):
-            status_emoji = "🔒"
-        else:
-            status_emoji = "⚠️"
-
-        # Photo 2 style clean formatting with single status emoji
-        msg = await bot.send_message(
-            chat_id,
-            f"Number: +{phone} {status_emoji}\nOTP: Waiting for SMS...",
-            reply_markup=kb.number_action_menu(aid)
+    try:
+        res = await asyncio.wait_for(
+            client.get_number(service=service, country=country_id, max_price=MAX_PRICE),
+            timeout=9.0
         )
+    except asyncio.TimeoutError:
+        await bot.send_message(chat_id, "⚠️ HeroSMS API response timed out. Skipping...")
+        return False
+    except Exception as e:
+        await bot.send_message(chat_id, f"⚠️ Error contacting HeroSMS: {e}")
+        return False
 
-        await db.save_activation(aid, user_id, phone, msg.message_id)
+    if not isinstance(res, dict) or "activationId" not in res:
+        err = res.get("title", str(res)) if isinstance(res, dict) else str(res)
+        await bot.send_message(chat_id, f"Failed to buy number: {html.escape(str(err))}")
+        return False
 
-        # Non-fresh numbers get scheduled for auto-refund
-        if not is_fresh and any(x in badge for x in ["Registered", "Banned", "Locked"]):
-            asyncio.create_task(auto_cancel_bad_number_worker(client, aid, phone, user_id))
-        else:
-            asyncio.create_task(poll_sms(bot, chat_id, aid, phone, client))
+    aid = str(res["activationId"])
+    phone = res.get("phoneNumber", "Unknown")
 
-        return True
+    await db.increment_user_stats(user_id, purchased=1)
+
+    # --- Live TG Checker with Safe 5s Timeout ---
+    status_emoji = "✅"
+    is_fresh = True
+    badge = "Fresh"
+
+    try:
+        check_res = await asyncio.wait_for(check_telegram_numbers([phone]), timeout=5.0)
+        if isinstance(check_res, dict):
+            badge, is_fresh = format_tg_status(check_res.get(f"+{phone}") or check_res.get(phone))
+            if is_fresh:
+                status_emoji = "✅"
+            elif any(x in badge for x in ["Banned", "Ban"]):
+                status_emoji = "🚫"
+            elif any(x in badge for x in ["Registered", "Occupied"]):
+                status_emoji = "❌"
+            elif any(x in badge for x in ["Locked", "Flood"]):
+                status_emoji = "🔒"
+            else:
+                status_emoji = "⚠️"
+    except Exception as e:
+        logging.warning(f"Checker skipped for {phone}: {e}")
+        status_emoji = "⚠️"
+
+    msg = await bot.send_message(
+        chat_id,
+        f"Number: +{phone} {status_emoji}\nOTP: Waiting for SMS...",
+        reply_markup=kb.number_action_menu(aid)
+    )
+
+    await db.save_activation(aid, user_id, phone, msg.message_id)
+
+    # Bad numbers get scheduled for auto-refund
+    if not is_fresh and any(x in badge for x in ["Registered", "Banned", "Locked"]):
+        asyncio.create_task(auto_cancel_bad_number_worker(client, aid, phone, user_id))
+    else:
+        asyncio.create_task(poll_sms(bot, chat_id, aid, phone, client))
+
+    return True
 
 
 @router.callback_query(F.data.startswith("refresh_"))
@@ -600,8 +616,10 @@ async def process_bulk_amount(message: Message, state: FSMContext):
 
     await state.clear()
     user = await get_cached_user(message.from_user.id)
-    client = HeroSMSClient(user["api_key"])
+    if not user or not user.get("api_key"):
+        return await message.answer("Please set your API key first.")
 
+    client = HeroSMSClient(user["api_key"])
     await message.answer(f"⏳ Starting bulk purchase of {amount} numbers...")
 
     for i in range(amount):
@@ -612,7 +630,7 @@ async def process_bulk_amount(message: Message, state: FSMContext):
         if not success:
             await message.answer(f"Stopped bulk purchase at item #{i+1}.")
             break
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
 
 
 @router.message(F.text == "Active Numbers")
@@ -632,7 +650,7 @@ async def text_active_numbers(message: Message):
 
         activations = res.get("data", [])
         if not activations:
-            return await message.answer("ℹ️️ No active numbers.")
+            return await message.answer("ℹ️ No active numbers.")
 
         await message.answer(f"Active Numbers ({len(activations)}):", reply_markup=kb.active_numbers_menu(activations))
 
@@ -705,8 +723,7 @@ async def cmd_admin(message: Message):
     )
 
 
-@router.message(F.text == "⬅️️ Back to User Menu")
-@router.message(F.text == "⬅ Back to User Menu")
+@router.message(F.text == "⬅️ Back to User Menu")
 async def back_to_user_menu(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
@@ -840,7 +857,7 @@ async def admin_monitor_users(message: Message):
     async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
         users = await db.get_approved_users()
         if not users:
-            return await message.answer("ℹ️ No approved users found.")
+            return await message.answer("ℹ️️ No approved users found.")
 
         lines = [f"📊 <b>Approved Users Monitoring ({len(users)}):</b>\n"]
         for idx, u in enumerate(users, 1):
@@ -888,7 +905,7 @@ async def admin_live_active_users(message: Message):
                     pass
 
         if not active_list:
-            return await message.answer("ℹ️️ Currently no users have active valid subscriptions.")
+            return await message.answer("ℹ️ Currently no users have active valid subscriptions.")
 
         lines = [f"👥 <b>Live Active Users ({len(active_list)}):</b>\n"]
         for idx, (u, time_left) in enumerate(active_list, 1):
