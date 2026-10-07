@@ -8,10 +8,10 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 def main_reply_menu() -> ReplyKeyboardMarkup:
     b = ReplyKeyboardBuilder()
-    b.button(text="Bulk Buy Numbers")
-    b.button(text="Active Numbers")
-    b.button(text="Balance")
-    b.button(text="Profile")
+    b.button(text="Bulk Buy Numbers", style="success")
+    b.button(text="Active Numbers", style="primary")
+    b.button(text="Balance", style="success")
+    b.button(text="Profile", style="primary")
     b.adjust(2, 2)
     return b.as_markup(resize_keyboard=True)
 
@@ -19,45 +19,45 @@ def main_reply_menu() -> ReplyKeyboardMarkup:
 def admin_reply_menu(restock_on: bool = True) -> ReplyKeyboardMarkup:
     restock_label = "🔔 Restock Alert: ON" if restock_on else "🔕 Restock Alert: OFF"
     b = ReplyKeyboardBuilder()
-    b.button(text="📦 Check Live Stock")
-    b.button(text="📊 Users & OTP Monitor")
-    b.button(text="👥 Live Active Users")
-    b.button(text="📢 Broadcast Message")
-    b.button(text="🚫 Ban / Unban User")
-    b.button(text="❌ Unapprove / Revoke Access")
-    b.button(text="⏳ Extend User Subscription")
-    b.button(text=restock_label)
-    b.button(text="⚙️ Toggle Maintenance")
-    b.button(text="⬅️ Back to User Menu")
+    b.button(text="📦 Check Live Stock", style="primary")
+    b.button(text="📊 Users & OTP Monitor", style="primary")
+    b.button(text="👥 Live Active Users", style="success")
+    b.button(text="📢 Broadcast Message", style="primary")
+    b.button(text="🚫 Ban / Unban User", style="danger")
+    b.button(text="❌ Unapprove / Revoke Access", style="danger")
+    b.button(text="⏳ Extend User Subscription", style="success")
+    b.button(text=restock_label, style="success" if restock_on else "danger")
+    b.button(text="⚙️ Toggle Maintenance", style="danger")
+    b.button(text="⬅️ Back to User Menu", style="primary")
     b.adjust(1, 2, 2, 2, 2, 1)
     return b.as_markup(resize_keyboard=True)
 
 
 def stock_broadcast_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="📢 Broadcast this Alert to All Users", callback_data="broadcast_live_stock")
+    b.button(text="📢 Broadcast this Alert to All Users", callback_data="broadcast_live_stock", style="primary")
     b.adjust(1)
     return b.as_markup()
 
 
 def profile_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="Change API Key", callback_data="profile_change_key")
-    b.button(text="Back", callback_data="menu_main")
+    b.button(text="Change API Key", callback_data="profile_change_key", style="primary")
+    b.button(text="Back", callback_data="menu_main", style="primary")
     b.adjust(1)
     return b.as_markup()
 
 
 def back_button(callback_data: str = "menu_main") -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="Back", callback_data=callback_data)
+    b.button(text="Back", callback_data=callback_data, style="primary")
     return b.as_markup()
 
 
 def number_action_menu(activation_id: str) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="Refresh OTP", callback_data=f"refresh_{activation_id}")
-    b.button(text="Cancel Number", callback_data=f"single_cancel_{activation_id}")
+    b.button(text="Refresh OTP", callback_data=f"refresh_{activation_id}", style="success")
+    b.button(text="Cancel Number", callback_data=f"single_cancel_{activation_id}", style="danger")
     b.adjust(2)
     return b.as_markup()
 
@@ -68,10 +68,10 @@ def active_numbers_menu(activations: list) -> InlineKeyboardMarkup:
         aid = str(act.get("activationId", ""))
         phone = str(act.get("phoneNumber", "Unknown"))
         if aid:
-            b.button(text=f"Cancel +{phone}", callback_data=f"active_cancel_{aid}")
+            b.button(text=f"Cancel +{phone}", callback_data=f"active_cancel_{aid}", style="danger")
 
-    b.button(text="Cancel All Active", callback_data="cancel_all_active")
-    b.button(text="Back", callback_data="menu_main")
+    b.button(text="Cancel All Active", callback_data="cancel_all_active", style="danger")
+    b.button(text="Back", callback_data="menu_main", style="primary")
     b.adjust(1)
     return b.as_markup()
 
@@ -82,21 +82,21 @@ def otp_copy_menu(otp_code: str) -> InlineKeyboardMarkup:
         from aiogram.types import CopyTextButton
         b.row(
             InlineKeyboardButton(
-                text="Copy OTP", copy_text=CopyTextButton(text=str(otp_code))
+                text="Copy OTP", copy_text=CopyTextButton(text=str(otp_code)), style="success"
             )
         )
     except ImportError:
-        b.button(text="Copy OTP", callback_data="noop")
+        b.button(text="Copy OTP", callback_data="noop", style="success")
     return b.as_markup()
 
 
 def approval_duration_menu(user_id: int) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.button(text="1 Day", callback_data=f"appr_{user_id}_1")
-    b.button(text="3 Days", callback_data=f"appr_{user_id}_3")
-    b.button(text="7 Days", callback_data=f"appr_{user_id}_7")
-    b.button(text="30 Days", callback_data=f"appr_{user_id}_30")
-    b.button(text="Lifetime", callback_data=f"appr_{user_id}_life")
-    b.button(text="❌ Reject", callback_data=f"appr_{user_id}_reject")
+    b.button(text="1 Day", callback_data=f"appr_{user_id}_1", style="primary")
+    b.button(text="3 Days", callback_data=f"appr_{user_id}_3", style="primary")
+    b.button(text="7 Days", callback_data=f"appr_{user_id}_7", style="primary")
+    b.button(text="30 Days", callback_data=f"appr_{user_id}_30", style="primary")
+    b.button(text="Lifetime", callback_data=f"appr_{user_id}_life", style="success")
+    b.button(text="❌ Reject", callback_data=f"appr_{user_id}_reject", style="danger")
     b.adjust(2, 3, 1)
     return b.as_markup()
