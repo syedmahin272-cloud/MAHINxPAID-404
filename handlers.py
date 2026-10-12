@@ -28,9 +28,9 @@ def get_bot_instance():
 
 
 ADMIN_ID = 7266067201
-COLOMBIA_ID = 33
+COLOMBIA_ID = 39
 TG_SERVICE = "tg"
-MAX_PRICE = 0.145
+MAX_PRICE = 0.41
 
 MENU_BUTTONS = [
     "Bulk Buy Numbers",
