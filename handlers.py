@@ -1064,7 +1064,7 @@ async def process_add_prefix(message: Message, state: FSMContext):
 
     await update_cached_setting("buy_excluded_prefixes", json.dumps(current))
     await state.clear()
-    await message.answer(f"{EMOJI_TICK} Added prefixes: {', '.join(added)}\nTotal active: {len(current)}")
+    await message.answer(f"{EMOJI_TICK} Added prefixes: {', '.join(added)}\nTotal active: {len(current)}", parse_mode="HTML")
 
 
 @router.callback_query(F.data == "pfx_remove")
