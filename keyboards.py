@@ -21,7 +21,10 @@ def admin_reply_menu(restock_on: bool = True) -> ReplyKeyboardMarkup:
     b = ReplyKeyboardBuilder()
     b.button(text="📦 Check Live Stock", style="primary")
     b.button(text="📊 Users & OTP Monitor", style="primary")
+    b.button(text="📈 Daily & Lifetime Stats", style="primary")
     b.button(text="👥 Live Active Users", style="success")
+    b.button(text="⚙️ Buy Config (Operator/Price)", style="primary")
+    b.button(text="🚫 Manage Excluded Prefixes", style="primary")
     b.button(text="📢 Broadcast Message", style="primary")
     b.button(text="🚫 Ban / Unban User", style="danger")
     b.button(text="❌ Unapprove / Revoke Access", style="danger")
@@ -29,8 +32,31 @@ def admin_reply_menu(restock_on: bool = True) -> ReplyKeyboardMarkup:
     b.button(text=restock_label, style="success" if restock_on else "danger")
     b.button(text="⚙️ Toggle Maintenance", style="danger")
     b.button(text="⬅️ Back to User Menu", style="primary")
-    b.adjust(1, 2, 2, 2, 2, 1)
+    b.adjust(1, 2, 2, 2, 2, 2, 1, 1)
     return b.as_markup(resize_keyboard=True)
+
+
+def admin_config_menu(current_op: str, current_price: float) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text=f"🏢 Operator: {current_op.upper()}", callback_data="cfg_set_operator", style="primary")
+    b.button(text=f"💲 Max Price: ${current_price:.3f}", callback_data="cfg_set_price", style="primary")
+    b.button(text="Set Any Operator", callback_data="cfg_op_any", style="success")
+    b.button(text="Set Claro Only", callback_data="cfg_op_claro", style="success")
+    b.button(text="Set Movistar Only", callback_data="cfg_op_movistar", style="success")
+    b.button(text="Set Tigo Only", callback_data="cfg_op_tigo", style="success")
+    b.button(text="Back", callback_data="menu_admin_close", style="danger")
+    b.adjust(2, 2, 2, 1)
+    return b.as_markup()
+
+
+def prefix_manage_menu() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.button(text="➕ Add Prefix", callback_data="pfx_add", style="success")
+    b.button(text="➖ Remove Prefix", callback_data="pfx_remove", style="danger")
+    b.button(text="📋 View All Prefixes", callback_data="pfx_view", style="primary")
+    b.button(text="Back", callback_data="menu_admin_close", style="primary")
+    b.adjust(2, 1, 1)
+    return b.as_markup()
 
 
 def stock_broadcast_menu() -> InlineKeyboardMarkup:
