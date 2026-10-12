@@ -32,6 +32,26 @@ COLOMBIA_ID = 39
 TG_SERVICE = "tg"
 MAX_PRICE = 0.41
 
+# ==========================================
+# MANUAL EXCLUDED PREFIXES LIST
+# Ekhane eshe tumi joto icche prefix jog/biyog korte parba
+# ==========================================
+EXCLUDED_PREFIXES = [
+    "57319",
+]
+
+def is_prefix_excluded(phone: str) -> bool:
+    """Check kore phone number e excluded prefix ache ki na"""
+    if not phone:
+        return False
+    clean_p = re.sub(r'[^\d]', '', str(phone))
+    for pref in EXCLUDED_PREFIXES:
+        clean_pref = re.sub(r'[^\d]', '', str(pref))
+        if clean_pref and clean_p.startswith(clean_pref):
+            return True
+    return False
+
+
 MENU_BUTTONS = [
     "Bulk Buy Numbers",
     "Active Numbers",
@@ -196,7 +216,7 @@ async def is_allowed(user_id: int) -> bool:
         return True
     
     user = await get_cached_user(user_id)
-    if not user or user.get("is_banned") or not user.get("is_approved"):
+    if not user or not user.get("is_banned") or not user.get("is_approved"):
         return False
 
     exp = user.get("expiry_date")
@@ -498,25 +518,52 @@ async def text_balance(message: Message):
 
 # --- Number Purchase Engine (Active Checker + Monospace Tap-to-Copy) ---
 async def buy_single_number_process(bot, user_id: int, chat_id: int, service: str, country_id: int, client: HeroSMSClient):
-    try:
-        res = await asyncio.wait_for(
-            client.get_number(service=service, country=country_id, max_price=MAX_PRICE),
-            timeout=9.0
-        )
-    except asyncio.TimeoutError:
-        await bot.send_message(chat_id, f'{EMOJI_WARN} HeroSMS API response timed out. Skipping...')
-        return False
-    except Exception as e:
-        await bot.send_message(chat_id, f'{EMOJI_WARN} Error contacting HeroSMS: {e}')
-        return False
+    # API exception string toiri (comma-separated format)
+    phone_exception_str = ",".join(EXCLUDED_PREFIXES) if EXCLUDED_PREFIXES else None
 
-    if not isinstance(res, dict) or "activationId" not in res:
-        err = res.get("title", str(res)) if isinstance(res, dict) else str(res)
-        await bot.send_message(chat_id, f'Failed to buy number: {html.escape(str(err))}')
-        return False
+    # Ekhane retry loop kora holo jate excluded prefix ashle auto refund kore arekta number ney (Max 5 attempts)
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            res = await asyncio.wait_for(
+                client.get_number(
+                    service=service,
+                    country=country_id,
+                    max_price=MAX_PRICE,
+                    phone_exception=phone_exception_str
+                ),
+                timeout=9.0
+            )
+        except asyncio.TimeoutError:
+            await bot.send_message(chat_id, f'{EMOJI_WARN} HeroSMS API response timed out. Skipping...')
+            return False
+        except Exception as e:
+            await bot.send_message(chat_id, f'{EMOJI_WARN} Error contacting HeroSMS: {e}')
+            return False
 
-    aid = str(res["activationId"])
-    phone = res.get("phoneNumber", "Unknown")
+        if not isinstance(res, dict) or "activationId" not in res:
+            err = res.get("title", str(res)) if isinstance(res, dict) else str(res)
+            await bot.send_message(chat_id, f'Failed to buy number: {html.escape(str(err))}')
+            return False
+
+        aid = str(res["activationId"])
+        phone = str(res.get("phoneNumber", "Unknown"))
+
+        # Fallback Check: Jodi number ti EXCLUDED_PREFIXES er sathe mile jay
+        if is_prefix_excluded(phone):
+            logging.info(f"Number +{phone} matched excluded prefix. Cancelling and requesting a new one...")
+            try:
+                await client.set_status(aid, 8)  # Instantly cancel activation and refund balance
+            except Exception as ex:
+                logging.warning(f"Failed to cancel excluded number {aid}: {ex}")
+            await asyncio.sleep(0.5)
+            continue  # Notun number cheshta korbe
+
+        # Prefix thik thakle loop break kore process korbe
+        break
+    else:
+        await bot.send_message(chat_id, f"{EMOJI_WARN} Could not obtain number without excluded prefix after {max_retries} retries.")
+        return False
 
     await db.increment_user_stats(user_id, purchased=1)
 
