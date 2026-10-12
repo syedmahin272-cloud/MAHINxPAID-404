@@ -6,7 +6,6 @@ import re
 import urllib.request
 import urllib.error
 
-# requests thakle use korbe, na thakle built-in urllib diye 60s timeout-e cholbe
 try:
     import requests
     HAS_REQUESTS = True
@@ -15,7 +14,6 @@ except ImportError:
 
 BASE_URL = "https://hero-sms.com/stubs/handler_api.php"
 
-# Telegram Checker API Credentials
 CHECKER_URL = "http://api.agbots.site:8080/check/"
 CHECKER_AUTH = "user8354"
 CHECKER_API_KEY = "SIGUzg7Xf7euGs8B"
@@ -74,7 +72,6 @@ def _sync_check_chunk(chunk_numbers: list) -> dict:
 
 
 async def check_telegram_numbers(phone_numbers: list) -> dict:
-    """Telegram number checker helper function"""
     if not phone_numbers:
         return {}
 
@@ -167,13 +164,15 @@ class HeroSMSClient:
         return await self._get("getPrices", **params)
 
     async def get_number(
-        self, service: str, country: int, max_price: float = None, phone_exception: str = None
+        self, service: str, country: int, max_price: float = None, phone_exception: str = None, operator: str = None
     ):
         params = {"service": service, "country": country}
         if max_price:
             params["maxPrice"] = max_price
         if phone_exception:
             params["phoneException"] = phone_exception
+        if operator and operator.lower() != "any":
+            params["operator"] = operator
         return await self._get("getNumberV2", **params)
 
     async def get_status(self, activation_id: str):
