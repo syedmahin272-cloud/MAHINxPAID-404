@@ -1,5 +1,6 @@
 import asyncio
 import html
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -30,40 +31,11 @@ def get_bot_instance():
 ADMIN_ID = 7266067201
 COLOMBIA_ID = 33
 TG_SERVICE = "tg"
-MAX_PRICE = 0.145
 
-# ==========================================
-# MANUAL EXCLUDED PREFIXES LIST
-# Ekhane eshe tumi joto icche prefix jog/biyog korte parba
-# ==========================================
-EXCLUDED_PREFIXES = [
-    "57319",
-    "57320",
-    "57310",
-    "57311",
-    "57312",
-    "57313",
-    "57314",
-    "57321",
-    "57323",
-    "57300",
-    "57301",
-    "57304",
-    "57305",
-    "57324",
-]
-
-def is_prefix_excluded(phone: str) -> bool:
-    """Check kore phone number e excluded prefix ache ki na"""
-    if not phone:
-        return False
-    clean_p = re.sub(r'[^\d]', '', str(phone))
-    for pref in EXCLUDED_PREFIXES:
-        clean_pref = re.sub(r'[^\d]', '', str(pref))
-        if clean_pref and clean_p.startswith(clean_pref):
-            return True
-    return False
-
+# Defaults
+DEFAULT_MAX_PRICE = 0.145
+DEFAULT_OPERATOR = "any"
+DEFAULT_PREFIXES = ["57319"]
 
 MENU_BUTTONS = [
     "Bulk Buy Numbers",
@@ -72,7 +44,10 @@ MENU_BUTTONS = [
     "Profile",
     "📦 Check Live Stock",
     "📊 Users & OTP Monitor",
+    "📈 Daily & Lifetime Stats",
     "👥 Live Active Users",
+    "⚙️ Buy Config (Operator/Price)",
+    "🚫 Manage Excluded Prefixes",
     "📢 Broadcast Message",
     "🚫 Ban / Unban User",
     "❌ Unapprove / Revoke Access",
@@ -118,16 +93,50 @@ def invalidate_user_cache(user_id: int):
     USER_CACHE.pop(user_id, None)
 
 
-async def get_cached_setting(key: str):
+async def get_cached_setting(key: str, default: str = ""):
     if key in SETTINGS_CACHE:
         return SETTINGS_CACHE[key]
     val = await db.get_setting(key)
+    if val is None:
+        val = default
     SETTINGS_CACHE[key] = val
     return val
 
 
-def update_cached_setting(key: str, val: str):
+async def update_cached_setting(key: str, val: str):
     SETTINGS_CACHE[key] = val
+    await db.set_setting(key, val)
+
+
+async def get_active_operator() -> str:
+    return await get_cached_setting("buy_operator", DEFAULT_OPERATOR)
+
+
+async def get_active_max_price() -> float:
+    val = await get_cached_setting("buy_max_price", str(DEFAULT_MAX_PRICE))
+    try:
+        return float(val)
+    except:
+        return DEFAULT_MAX_PRICE
+
+
+async def get_active_prefixes() -> list:
+    val = await get_cached_setting("buy_excluded_prefixes", json.dumps(DEFAULT_PREFIXES))
+    try:
+        return json.loads(val)
+    except:
+        return DEFAULT_PREFIXES
+
+
+def is_prefix_excluded(phone: str, prefixes: list) -> bool:
+    if not phone:
+        return False
+    clean_p = re.sub(r'[^\d]', '', str(phone))
+    for pref in prefixes:
+        clean_pref = re.sub(r'[^\d]', '', str(pref))
+        if clean_pref and clean_p.startswith(clean_pref):
+            return True
+    return False
 
 
 # --- Background Tasks ---
@@ -153,7 +162,7 @@ async def start_restock_monitor():
     first_run = True
     while True:
         try:
-            is_enabled = await get_cached_setting("restock_monitor")
+            is_enabled = await get_cached_setting("restock_monitor", "0")
             if is_enabled == "1":
                 admin_user = await get_cached_user(ADMIN_ID)
                 if admin_user and admin_user.get("api_key"):
@@ -229,7 +238,7 @@ async def is_allowed(user_id: int) -> bool:
         return True
     
     user = await get_cached_user(user_id)
-    if not user or not user.get("is_banned") or not user.get("is_approved"):
+    if not user or user.get("is_banned") or not user.get("is_approved"):
         return False
 
     exp = user.get("expiry_date")
@@ -250,7 +259,7 @@ async def is_allowed(user_id: int) -> bool:
         except Exception:
             pass
 
-    maintenance = await get_cached_setting("maintenance")
+    maintenance = await get_cached_setting("maintenance", "0")
     if maintenance == "1":
         return False
     return True
@@ -383,7 +392,7 @@ async def cmd_start(message: Message, state: FSMContext):
         if not await is_allowed(uid):
             return
 
-        maintenance = await get_cached_setting("maintenance")
+        maintenance = await get_cached_setting("maintenance", "0")
         if maintenance == "1" and uid != ADMIN_ID:
             return await message.answer(f'{EMOJI_WARN} Bot is under maintenance. Contact Admin.')
 
@@ -529,12 +538,15 @@ async def text_balance(message: Message):
             await message.answer(f'{EMOJI_CROSS} Error fetching balance.')
 
 
-# --- Number Purchase Engine (Active Checker + Monospace Tap-to-Copy) ---
+# --- Number Purchase Engine (Active Checker + Prefix Filter) ---
 async def buy_single_number_process(bot, user_id: int, chat_id: int, service: str, country_id: int, client: HeroSMSClient):
-    # API exception string toiri (comma-separated format)
-    phone_exception_str = ",".join(EXCLUDED_PREFIXES) if EXCLUDED_PREFIXES else None
+    active_op = await get_active_operator()
+    active_price = await get_active_max_price()
+    excluded_prefixes = await get_active_prefixes()
+    
+    # HeroSMS supports up to 20 prefixes in phoneException (comma separated)
+    phone_exception_str = ",".join(excluded_prefixes[:20]) if excluded_prefixes else None
 
-    # Ekhane retry loop kora holo jate excluded prefix ashle auto refund kore arekta number ney (Max 5 attempts)
     max_retries = 5
     for attempt in range(max_retries):
         try:
@@ -542,8 +554,9 @@ async def buy_single_number_process(bot, user_id: int, chat_id: int, service: st
                 client.get_number(
                     service=service,
                     country=country_id,
-                    max_price=MAX_PRICE,
-                    phone_exception=phone_exception_str
+                    max_price=active_price,
+                    phone_exception=phone_exception_str,
+                    operator=active_op
                 ),
                 timeout=9.0
             )
@@ -562,17 +575,16 @@ async def buy_single_number_process(bot, user_id: int, chat_id: int, service: st
         aid = str(res["activationId"])
         phone = str(res.get("phoneNumber", "Unknown"))
 
-        # Fallback Check: Jodi number ti EXCLUDED_PREFIXES er sathe mile jay
-        if is_prefix_excluded(phone):
-            logging.info(f"Number +{phone} matched excluded prefix. Cancelling and requesting a new one...")
+        # In-script double check for excluded prefixes
+        if is_prefix_excluded(phone, excluded_prefixes):
+            logging.info(f"Number +{phone} matched excluded prefix. Auto-cancelling...")
             try:
-                await client.set_status(aid, 8)  # Instantly cancel activation and refund balance
-            except Exception as ex:
-                logging.warning(f"Failed to cancel excluded number {aid}: {ex}")
-            await asyncio.sleep(0.5)
-            continue  # Notun number cheshta korbe
+                await client.set_status(aid, 8)
+            except Exception:
+                pass
+            await asyncio.sleep(0.4)
+            continue
 
-        # Prefix thik thakle loop break kore process korbe
         break
     else:
         await bot.send_message(chat_id, f"{EMOJI_WARN} Could not obtain number without excluded prefix after {max_retries} retries.")
@@ -580,7 +592,6 @@ async def buy_single_number_process(bot, user_id: int, chat_id: int, service: st
 
     await db.increment_user_stats(user_id, purchased=1)
 
-    # --- Live TG Checker with Safe 5s Timeout ---
     status_emoji = EMOJI_TICK
     is_fresh = True
     badge = "Fresh"
@@ -612,7 +623,6 @@ async def buy_single_number_process(bot, user_id: int, chat_id: int, service: st
 
     await db.save_activation(aid, user_id, phone, msg.message_id)
 
-    # Bad numbers get scheduled for auto-refund
     if not is_fresh and any(x in badge for x in ["Registered", "Banned", "Locked"]):
         asyncio.create_task(auto_cancel_bad_number_worker(client, aid, phone, user_id))
     else:
@@ -796,12 +806,12 @@ async def cb_active_cancel(callback: CallbackQuery):
         await callback.answer("Failed to cancel.", show_alert=True)
 
 
-# --- Admin Panel & Live Stock Controls ---
+# --- Admin Panel Switch ---
 @router.message(Command("admin"))
 async def cmd_admin(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
-    is_restock = (await get_cached_setting("restock_monitor")) == "1"
+    is_restock = (await get_cached_setting("restock_monitor", "0")) == "1"
     await message.answer(
         f'{EMOJI_KEY} <b>Admin Control Panel Activated!</b>\n\nKeyboard switched to Admin tools:',
         reply_markup=kb.admin_reply_menu(restock_on=is_restock),
@@ -907,14 +917,243 @@ async def cb_broadcast_live_stock(callback: CallbackQuery):
     await callback.message.reply(f'{EMOJI_TICK} Stock alert broadcasted to <b>{sent}</b> active users!', parse_mode="HTML")
 
 
+# --- Dynamic Buy Config (Operator / Price) ---
+@router.message(F.text == "⚙️ Buy Config (Operator/Price)")
+async def admin_buy_config(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    current_op = await get_active_operator()
+    current_price = await get_active_max_price()
+    text = (
+        f"⚙️ <b>Live Purchase Configuration:</b>\n\n"
+        f"🏢 <b>Target Operator:</b> <code>{current_op.upper()}</code>\n"
+        f"💲 <b>Maximum Price:</b> <code>${current_price:.3f}</code>\n\n"
+        f"Click below to change instantly:"
+    )
+    await message.answer(text, reply_markup=kb.admin_config_menu(current_op, current_price), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("cfg_op_"))
+async def cb_config_quick_operator(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return await callback.answer("Unauthorized", show_alert=True)
+    op = callback.data[len("cfg_op_"):]
+    await update_cached_setting("buy_operator", op)
+    await callback.answer(f"Operator set to: {op.upper()}", show_alert=True)
+    current_price = await get_active_max_price()
+    text = (
+        f"⚙️ <b>Live Purchase Configuration:</b>\n\n"
+        f"🏢 <b>Target Operator:</b> <code>{op.upper()}</code>\n"
+        f"💲 <b>Maximum Price:</b> <code>${current_price:.3f}</code>\n\n"
+        f"Click below to change instantly:"
+    )
+    await callback.message.edit_text(text, reply_markup=kb.admin_config_menu(op, current_price), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "cfg_set_operator")
+async def cb_cfg_set_op_manual(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await callback.message.edit_text("Send the operator code (e.g. <code>claro</code>, <code>movistar</code>, <code>tigo</code>, or <code>any</code>):", parse_mode="HTML")
+    await state.set_state(BotStates.waiting_for_operator)
+
+
+@router.message(BotStates.waiting_for_operator)
+async def process_manual_operator(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    text = message.text.strip().lower()
+    if text in ["cancel", "back"] or message.text.strip() in MENU_BUTTONS:
+        await state.clear()
+        return await message.answer("Operator setting cancelled.")
+    
+    await update_cached_setting("buy_operator", text)
+    await state.clear()
+    await message.answer(f"{EMOJI_TICK} Purchase operator updated to: <b>{text.upper()}</b>", parse_mode="HTML")
+
+
+@router.callback_query(F.data == "cfg_set_price")
+async def cb_cfg_set_price(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await callback.message.edit_text("Send the new <b>Max Price</b> in USD (e.g. 0.145, 0.20, 0.41):", parse_mode="HTML")
+    await state.set_state(BotStates.waiting_for_max_price)
+
+
+@router.message(BotStates.waiting_for_max_price)
+async def process_manual_max_price(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    text = message.text.strip()
+    if text.lower() in ["cancel", "back"] or text in MENU_BUTTONS:
+        await state.clear()
+        return await message.answer("Max price update cancelled.")
+    try:
+        val = float(text)
+        if val <= 0:
+            raise ValueError
+    except:
+        return await message.answer("Please send a valid positive number:")
+
+    await update_cached_setting("buy_max_price", str(val))
+    await state.clear()
+    await message.answer(f"{EMOJI_TICK} Max purchase price set to: <b>${val:.3f}</b>", parse_mode="HTML")
+
+
+@router.callback_query(F.data == "menu_admin_close")
+async def cb_admin_menu_close(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await callback.message.delete()
+    except Exception:
+        pass
+
+
+# --- Dynamic Excluded Prefixes Manager ---
+@router.message(F.text == "🚫 Manage Excluded Prefixes")
+async def admin_manage_prefixes(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    prefixes = await get_active_prefixes()
+    pref_str = ", ".join([f"<code>{p}</code>" for p in prefixes]) if prefixes else "<i>None</i>"
+    text = (
+        f"🚫 <b>Excluded Prefixes Manager</b>\n\n"
+        f"Currently Excluded ({len(prefixes)}):\n{pref_str}\n\n"
+        f"Select an action below:"
+    )
+    await message.answer(text, reply_markup=kb.prefix_manage_menu(), parse_mode="HTML")
+
+
+@router.callback_query(F.data == "pfx_view")
+async def cb_pfx_view(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    prefixes = await get_active_prefixes()
+    pref_str = "\n".join([f"• <code>{p}</code>" for p in prefixes]) if prefixes else "<i>No excluded prefixes</i>"
+    await callback.message.answer(f"📋 <b>All Excluded Prefixes:</b>\n\n{pref_str}", parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data == "pfx_add")
+async def cb_pfx_add(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await callback.message.edit_text("Send the prefix you want to exclude (e.g. <code>57319</code> or multiple separated by commas):", parse_mode="HTML")
+    await state.set_state(BotStates.waiting_for_add_prefix)
+
+
+@router.message(BotStates.waiting_for_add_prefix)
+async def process_add_prefix(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    text = message.text.strip()
+    if text.lower() in ["cancel", "back"] or text in MENU_BUTTONS:
+        await state.clear()
+        return await message.answer("Action cancelled.")
+
+    current = await get_active_prefixes()
+    new_items = [re.sub(r'[^\d]', '', x) for x in text.split(",") if re.sub(r'[^\d]', '', x)]
+    if not new_items:
+        return await message.answer("Please send valid numeric prefix(es):")
+
+    added = []
+    for item in new_items:
+        if item not in current:
+            current.append(item)
+            added.append(item)
+
+    await update_cached_setting("buy_excluded_prefixes", json.dumps(current))
+    await state.clear()
+    await message.answer(f"{EMOJI_TICK} Added prefixes: {', '.join(added)}\nTotal active: {len(current)}")
+
+
+@router.callback_query(F.data == "pfx_remove")
+async def cb_pfx_remove(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    current = await get_active_prefixes()
+    pref_str = ", ".join([f"<code>{p}</code>" for p in current]) if current else "None"
+    await callback.message.edit_text(f"Currently excluded: {pref_str}\n\nSend the prefix you want to remove:", parse_mode="HTML")
+    await state.set_state(BotStates.waiting_for_remove_prefix)
+
+
+@router.message(BotStates.waiting_for_remove_prefix)
+async def process_remove_prefix(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    text = message.text.strip()
+    if text.lower() in ["cancel", "back"] or text in MENU_BUTTONS:
+        await state.clear()
+        return await message.answer("Action cancelled.")
+
+    target = re.sub(r'[^\d]', '', text)
+    current = await get_active_prefixes()
+    if target in current:
+        current.remove(target)
+        await update_cached_setting("buy_excluded_prefixes", json.dumps(current))
+        await message.answer(f"{EMOJI_TICK} Prefix <code>{target}</code> removed successfully!", parse_mode="HTML")
+    else:
+        await message.answer(f"{EMOJI_WARN} Prefix <code>{target}</code> not found in list.", parse_mode="HTML")
+    await state.clear()
+
+
+# --- Daily & Lifetime Analytics ---
+@router.message(F.text == "📈 Daily & Lifetime Stats")
+async def admin_stats_overview(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
+        users = await db.get_approved_users()
+        if not users:
+            return await message.answer(f"{EMOJI_WARN} No users found.")
+
+        total_bot_bought = sum(u.get("total_purchased", 0) for u in users)
+        total_bot_otps = sum(u.get("total_otps", 0) for u in users)
+
+        # HeroSMS Account stats
+        admin_user = await get_cached_user(ADMIN_ID)
+        hs_today_stats = "N/A"
+        if admin_user and admin_user.get("api_key"):
+            try:
+                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                client = HeroSMSClient(admin_user["api_key"])
+                # getActivationStats endpoint call
+                stat_res = await client._get("stats", date=today_str)
+                if isinstance(stat_res, dict) and "data" in stat_res:
+                    hs_today_stats = "Data Available in HeroSMS API"
+            except Exception:
+                pass
+
+        lines = [
+            f"📈 <b>Bot Usage & Activity Summary</b>\n",
+            f"👥 <b>Total Approved Users:</b> <code>{len(users)}</code>",
+            f"📦 <b>Total Numbers Bought (Lifetime):</b> <code>{total_bot_bought}</code>",
+            f"💳 <b>Total OTPs Received (Lifetime):</b> <code>{total_bot_otps}</code>",
+            f"\n📊 <b>Per-User Breakdown (Lifetime):</b>"
+        ]
+
+        for idx, u in enumerate(users, 1):
+            uname = f"@{u['username']}" if u['username'] else "No Username"
+            lines.append(
+                f"<b>{idx}. {html.escape(str(u.get('full_name') or 'User'))}</b> ({uname})\n"
+                f"• ID: <code>{u['user_id']}</code> | Bought: <b>{u.get('total_purchased', 0)}</b> | OTPs: <b>{u.get('total_otps', 0)}</b>"
+            )
+
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            for chunk in [text[j:j+4000] for j in range(0, len(text), 4000)]:
+                await message.answer(chunk, parse_mode="HTML")
+        else:
+            await message.answer(text, parse_mode="HTML")
+
+
 @router.message(F.text.startswith("🔔 Restock Alert") | F.text.startswith("🔕 Restock Alert"))
 async def toggle_restock_alert(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
-    current = await get_cached_setting("restock_monitor")
+    current = await get_cached_setting("restock_monitor", "0")
     new_val = "0" if current == "1" else "1"
-    await db.set_setting("restock_monitor", new_val)
-    update_cached_setting("restock_monitor", new_val)
+    await update_cached_setting("restock_monitor", new_val)
     status_str = "ENABLED (Users will get alerts)" if new_val == "1" else "DISABLED"
     await message.answer(
         f"Restock Monitor is now: <b>{status_str}</b>",
@@ -928,10 +1167,9 @@ async def toggle_restock_alert(message: Message):
 async def admin_toggle_maint(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
-    current = await get_cached_setting("maintenance")
+    current = await get_cached_setting("maintenance", "0")
     new_val = "0" if current == "1" else "1"
-    await db.set_setting("maintenance", new_val)
-    update_cached_setting("maintenance", new_val)
+    await update_cached_setting("maintenance", new_val)
     status_label = f'ENABLED (Users Locked {EMOJI_CROSS})' if new_val == "1" else f'DISABLED (Normal Mode {EMOJI_TICK})'
     await message.answer(f'{EMOJI_WARN} Maintenance Mode is now: <b>{status_label}</b>', parse_mode="HTML")
 
