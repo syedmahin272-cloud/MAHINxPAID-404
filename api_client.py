@@ -108,77 +108,79 @@ async def check_telegram_numbers(phone_numbers: list) -> dict:
 
 class HeroSMSClient:
 
-  def __init__(self, api_key: str):
-    self.api_key = api_key.strip().strip("\"'").strip() if api_key else ""
+    def __init__(self, api_key: str):
+        self.api_key = api_key.strip().strip("\"'").strip() if api_key else ""
 
-  async def _get(self, action: str, **kwargs):
-    params = {"api_key": self.api_key, "action": action}
-    params.update(kwargs)
-    try:
-      async with aiohttp.ClientSession(headers=HEADERS) as session:
-        async with session.get(
-            BASE_URL, params=params, timeout=15
-        ) as response:
-          text = await response.text()
-          try:
-            return json.loads(text)
-          except json.JSONDecodeError:
-            return text
-    except Exception as e:
-      logging.error(f"API Error ({action}): {e}")
-      return None
-
-  async def get_balance(self):
-    res = await self._get("getBalance")
-    if isinstance(res, str):
-      res_clean = res.strip()
-      if res_clean.startswith("ACCESS_BALANCE:"):
+    async def _get(self, action: str, **kwargs):
+        params = {"api_key": self.api_key, "action": action}
+        params.update(kwargs)
         try:
-          return float(res_clean.split(":", 1)[1].strip())
-        except:
-          return None
-      try:
-        return float(res_clean)
-      except:
-        pass
-    elif isinstance(res, dict):
-      if "balance" in res:
-        try:
-          return float(res["balance"])
-        except:
-          pass
-      if (
-          "data" in res
-          and isinstance(res["data"], dict)
-          and "balance" in res["data"]
-      ):
-        try:
-          return float(res["data"]["balance"])
-        except:
-          pass
-    return None
+            async with aiohttp.ClientSession(headers=HEADERS) as session:
+                async with session.get(
+                    BASE_URL, params=params, timeout=15
+                ) as response:
+                    text = await response.text()
+                    try:
+                        return json.loads(text)
+                    except json.JSONDecodeError:
+                        return text
+        except Exception as e:
+            logging.error(f"API Error ({action}): {e}")
+            return None
 
-  async def get_prices(self, country: int = None, service: str = None):
-    params = {}
-    if country:
-      params["country"] = country
-    if service:
-      params["service"] = service
-    return await self._get("getPrices", **params)
+    async def get_balance(self):
+        res = await self._get("getBalance")
+        if isinstance(res, str):
+            res_clean = res.strip()
+            if res_clean.startswith("ACCESS_BALANCE:"):
+                try:
+                    return float(res_clean.split(":", 1)[1].strip())
+                except:
+                    return None
+            try:
+                return float(res_clean)
+            except:
+                pass
+        elif isinstance(res, dict):
+            if "balance" in res:
+                try:
+                    return float(res["balance"])
+                except:
+                    pass
+            if (
+                "data" in res
+                and isinstance(res["data"], dict)
+                and "balance" in res["data"]
+            ):
+                try:
+                    return float(res["data"]["balance"])
+                except:
+                    pass
+        return None
 
-  async def get_number(
-      self, service: str, country: int, max_price: float = None
-  ):
-    params = {"service": service, "country": country}
-    if max_price:
-      params["maxPrice"] = max_price
-    return await self._get("getNumberV2", **params)
+    async def get_prices(self, country: int = None, service: str = None):
+        params = {}
+        if country:
+            params["country"] = country
+        if service:
+            params["service"] = service
+        return await self._get("getPrices", **params)
 
-  async def get_status(self, activation_id: str):
-    return await self._get("getStatus", id=activation_id)
+    async def get_number(
+        self, service: str, country: int, max_price: float = None, phone_exception: str = None
+    ):
+        params = {"service": service, "country": country}
+        if max_price:
+            params["maxPrice"] = max_price
+        if phone_exception:
+            params["phoneException"] = phone_exception
+        return await self._get("getNumberV2", **params)
 
-  async def set_status(self, activation_id: str, status: int):
-    return await self._get("setStatus", id=str(activation_id), status=status)
+    async def get_status(self, activation_id: str):
+        return await self._get("getStatus", id=activation_id)
 
-  async def get_active_activations(self):
-    return await self._get("getActiveActivations")
+    async def set_status(self, activation_id: str, status: int):
+        return await self._get("setStatus", id=str(activation_id), status=status)
+
+    async def get_active_activations(self):
+        return await self._get("getActiveActivations")
