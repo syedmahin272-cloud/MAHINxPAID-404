@@ -28,9 +28,9 @@ def get_bot_instance():
 
 
 ADMIN_ID = 7266067201
-COLOMBIA_ID = 39
+COLOMBIA_ID = 33
 TG_SERVICE = "tg"
-MAX_PRICE = 0.41
+MAX_PRICE = 0.145
 
 # ==========================================
 # MANUAL EXCLUDED PREFIXES LIST
@@ -38,6 +38,19 @@ MAX_PRICE = 0.41
 # ==========================================
 EXCLUDED_PREFIXES = [
     "57319",
+    "57320",
+    "57310",
+    "57311",
+    "57312",
+    "57313",
+    "57314",
+    "57321",
+    "57323",
+    "57300",
+    "57301",
+    "57304",
+    "57305",
+    "57324",
 ]
 
 def is_prefix_excluded(phone: str) -> bool:
