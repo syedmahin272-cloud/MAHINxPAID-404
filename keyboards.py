@@ -52,10 +52,11 @@ def admin_config_menu(current_op: str, current_price: float) -> InlineKeyboardMa
 def prefix_manage_menu() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.button(text="➕ Add Prefix", callback_data="pfx_add", style="success")
-    b.button(text="➖ Remove Prefix", callback_data="pfx_remove", style="danger")
-    b.button(text="📋 View All Prefixes", callback_data="pfx_view", style="primary")
+    b.button(text="➖ Remove Prefix", callback_data="pfx_remove", style="primary")
+    b.button(text="🗑️ Clear All", callback_data="pfx_clear_all", style="danger")
+    b.button(text="📋 View All", callback_data="pfx_view", style="primary")
     b.button(text="Back", callback_data="menu_admin_close", style="primary")
-    b.adjust(2, 1, 1)
+    b.adjust(2, 2, 1)
     return b.as_markup()
 
 
