@@ -1067,13 +1067,27 @@ async def process_add_prefix(message: Message, state: FSMContext):
     await message.answer(f"{EMOJI_TICK} Added prefixes: {', '.join(added)}\nTotal active: {len(current)}", parse_mode="HTML")
 
 
+@router.callback_query(F.data == "pfx_clear_all")
+async def cb_pfx_clear_all(callback: CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        return
+    await update_cached_setting("buy_excluded_prefixes", json.dumps([]))
+    await callback.message.edit_text(f"{EMOJI_TICK} Shob excluded prefixes clear kora hoyeche!", parse_mode="HTML")
+    await callback.answer("Cleared all prefixes!")
+
+
 @router.callback_query(F.data == "pfx_remove")
 async def cb_pfx_remove(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
         return
     current = await get_active_prefixes()
     pref_str = ", ".join([f"<code>{p}</code>" for p in current]) if current else "None"
-    await callback.message.edit_text(f"Currently excluded: {pref_str}\n\nSend the prefix you want to remove:", parse_mode="HTML")
+    await callback.message.edit_text(
+        f"Currently excluded: {pref_str}\n\n"
+        "Send the prefix(es) you want to remove.\n"
+        "<i>Multiple thakle comma ba space diye pathao (e.g. <code>57319, 57320, 57321</code>):</i>",
+        parse_mode="HTML"
+    )
     await state.set_state(BotStates.waiting_for_remove_prefix)
 
 
@@ -1086,15 +1100,33 @@ async def process_remove_prefix(message: Message, state: FSMContext):
         await state.clear()
         return await message.answer("Action cancelled.")
 
-    target = re.sub(r'[^\d]', '', text)
     current = await get_active_prefixes()
-    if target in current:
-        current.remove(target)
-        await update_cached_setting("buy_excluded_prefixes", json.dumps(current))
-        await message.answer(f"{EMOJI_TICK} Prefix <code>{target}</code> removed successfully!", parse_mode="HTML")
-    else:
-        await message.answer(f"{EMOJI_WARN} Prefix <code>{target}</code> not found in list.", parse_mode="HTML")
+    
+    # Comma ba space diye alada kora multiple prefixes parse korbe
+    raw_targets = re.findall(r'\d+', text)
+    if not raw_targets:
+        return await message.answer("Please send valid numeric prefix(es):")
+
+    removed = []
+    not_found = []
+    for t in raw_targets:
+        if t in current:
+            current.remove(t)
+            removed.append(t)
+        else:
+            not_found.append(t)
+
+    await update_cached_setting("buy_excluded_prefixes", json.dumps(current))
     await state.clear()
+
+    reply_lines = []
+    if removed:
+        reply_lines.append(f"{EMOJI_TICK} <b>Removed ({len(removed)}):</b> {', '.join(removed)}")
+    if not_found:
+        reply_lines.append(f"{EMOJI_WARN} <b>Not found:</b> {', '.join(not_found)}")
+    reply_lines.append(f"<b>Remaining active:</b> {len(current)}")
+
+    await message.answer("\n".join(reply_lines), parse_mode="HTML")
 
 
 # --- Daily & Lifetime Analytics ---
