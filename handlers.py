@@ -4,7 +4,6 @@ import json
 import logging
 import re
 import time
-import uuid
 from datetime import datetime, timezone
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
@@ -44,7 +43,6 @@ MENU_BUTTONS = [
     "Active Numbers",
     "Balance",
     "Profile",
-    "📦 Check Live Stock",
     "📊 Users & OTP Monitor",
     "📈 Daily & Lifetime Stats",
     "👥 Live Active Users",
@@ -61,7 +59,7 @@ MENU_BUTTONS = [
     "⬅️ Back to User Menu"
 ]
 
-# --- 100% Real & Verified Custom Premium Emojis ---
+# --- Verified Custom Premium Emojis ---
 EMOJI_USER    = '<tg-emoji emoji-id="5397693616602755866">👤</tg-emoji>'
 EMOJI_ID      = '<tg-emoji emoji-id="5289967908309442996">🆔</tg-emoji>'
 EMOJI_FLAG    = '<tg-emoji emoji-id="5294010206974397371">🇨🇴</tg-emoji>'
@@ -84,7 +82,6 @@ SETTINGS_CACHE = {}
 last_known_stocks = {}
 LATEST_STOCK_REPORT = ""
 processed_otps = {}
-bulk_sessions_cache = {}
 
 async def get_cached_user(user_id: int):
     if user_id in USER_CACHE:
@@ -137,34 +134,16 @@ def is_prefix_excluded(phone: str, prefixes: list) -> bool:
             return True
     return False
 
-def get_colombia_operator(phone: str) -> str:
-    clean = str(phone).lstrip("+").strip()
-    if clean.startswith("57"):
-        clean = clean[2:]
-    prefix = clean[:3]
-    if prefix in ["310", "311", "312", "313", "314", "320", "321", "322", "323"]:
-        return "Claro"
-    elif prefix in ["300", "301", "302", "304", "305", "324"]:
-        return "Tigo"
-    elif prefix in ["315", "316", "317", "318"]:
-        return "Movistar"
-    elif prefix in ["350", "351"]:
-        return "WOM"
-    elif prefix in ["319"]:
-        return "Virgin"
-    return "Unknown"
-
-# Silent background auto-cancel for bad numbers without spamming notification
-async def silent_auto_cancel_worker(client: HeroSMSClient, aid: str):
+# Background auto-cancel without spamming user
+async def auto_cancel_bad_number_worker(client: HeroSMSClient, aid: str, phone: str, user_id: int):
     await asyncio.sleep(125)
     try:
         r = await client.set_status(aid, 8)
         if (isinstance(r, str) and ("CANCEL" in r)) or (isinstance(r, dict) and r.get("status") == "success"):
             await db.delete_activation(aid)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning(f"Auto-cancel worker error for {aid}: {e}")
 
-# Restock Monitor Background Worker (Imported by bot.py)
 async def start_restock_monitor():
     await asyncio.sleep(15)
     first_run = True
@@ -294,7 +273,7 @@ async def is_allowed(user_id: int) -> bool:
     return True
 
 # --- Webhook Handler ---
-async def handle_herosms_webhook(request: web.Request):
+async def handle_herosms_webhook(request):
     data = {}
     try:
         if request.method == "POST":
@@ -304,66 +283,61 @@ async def handle_herosms_webhook(request: web.Request):
                 data = dict(await request.post())
         if not data:
             data = dict(request.query)
-    except Exception as e:
-        logging.error(f"Error reading webhook request: {e}")
-        return web.Response(text="Bad Request", status=400)
+    except Exception:
+        data = dict(request.query)
 
-    aid = str(data.get("activationId") or data.get("id") or data.get("activation_id") or "").strip()
-    raw_code = data.get("code") or data.get("smsCode") or data.get("text") or data.get("sms") or ""
-    
-    code = ""
-    if raw_code:
+    action = data.get("action")
+    aid = data.get("activationId") or data.get("id") or data.get("activation_id")
+    raw_code = data.get("code") or data.get("smsCode") or data.get("text") or data.get("sms")
+
+    if not action or not aid:
+        return web.Response(text="Missing parameters", status=400)
+
+    if (action == "STATUS_OK" or "STATUS_OK" in str(action)) and raw_code:
         match = re.search(r'\b\d{4,6}\b', str(raw_code))
         code = match.group(0) if match else str(raw_code).strip()
 
-    if not aid or not code:
-        return web.Response(text="OK", status=200)
+        row = await db.get_activation(aid)
+        if row:
+            user_id = row["user_id"]
+            phone = row["phone"]
+            msg_id = row["message_id"]
+            cost_str = row.get("cost") or ""
+            price_tag = f" | {EMOJI_CARD} <code>{cost_str}</code>" if cost_str else ""
+            
+            text = f'{EMOJI_FLAG} Number: <code>+{phone}</code>{price_tag}\n{EMOJI_CARD} OTP: <code>{code}</code>'
+            bot = get_bot_instance()
+            if bot:
+                try:
+                    if msg_id:
+                        await bot.edit_message_text(
+                            text=text, chat_id=user_id, message_id=msg_id,
+                            reply_markup=kb.otp_copy_menu(code),
+                            parse_mode="HTML"
+                        )
+                    else:
+                        await bot.send_message(
+                            user_id, text,
+                            reply_markup=kb.otp_copy_menu(code),
+                            parse_mode="HTML"
+                        )
 
-    cache_key = f"{aid}:{code}"
-    if cache_key in processed_otps:
-        return web.Response(text="OK", status=200)
-    processed_otps[cache_key] = time.time()
+                    await db.increment_user_stats(user_id, otps=1)
+                    
+                    # Live forward to Monitoring Group
+                    await forward_to_log_group(bot, user_id, phone, aid, code)
 
-    row = await db.get_activation(aid)
-    if row:
-        user_id = row["user_id"]
-        phone = row["phone"]
-        msg_id = row.get("message_id")
-        clean_p = str(phone).lstrip("+").strip()
-
-        bot = get_bot_instance()
-        if bot:
-            text = f"{EMOJI_FLAG} <b>Telegram</b> <code>{clean_p}</code>"
-            try:
-                if msg_id:
-                    await bot.edit_message_text(
-                        text=text, chat_id=user_id, message_id=msg_id,
-                        reply_markup=kb.otp_copy_menu(code),
-                        parse_mode="HTML"
-                    )
-                else:
-                    await bot.send_message(
-                        user_id, text,
-                        reply_markup=kb.otp_copy_menu(code),
-                        parse_mode="HTML"
-                    )
-
-                await db.increment_user_stats(user_id, otps=1)
-                
-                # Live forward to Monitoring Group
-                await forward_to_log_group(bot, user_id, clean_p, aid, code)
-
-                user = await get_cached_user(user_id)
-                if user and user.get("api_key"):
-                    client = HeroSMSClient(user["api_key"])
-                    await client.set_status(aid, 6)
-                await db.delete_activation(aid)
-            except Exception as e:
-                logging.error(f"Failed to process webhook OTP for {user_id}: {e}")
-    return web.Response(text="OK", status=200)
+                    user = await get_cached_user(user_id)
+                    if user and user.get("api_key"):
+                        client = HeroSMSClient(user["api_key"])
+                        await client.set_status(aid, 6)
+                    await db.delete_activation(aid)
+                except Exception as e:
+                    logging.error(f"Failed to process webhook OTP for {user_id}: {e}")
+        return web.Response(text="OK")
+    return web.Response(text="Ignored")
 
 async def poll_sms(bot, chat_id: int, activation_id: str, phone: str, client: HeroSMSClient):
-    clean_p = str(phone).lstrip("+").strip()
     for _ in range(200):
         await asyncio.sleep(3)
         row = await db.get_activation(activation_id)
@@ -375,13 +349,11 @@ async def poll_sms(bot, chat_id: int, activation_id: str, phone: str, client: He
             if isinstance(res, str):
                 if res.startswith("STATUS_OK:"):
                     code = res.split(":", 1)[1]
-                    cache_key = f"{activation_id}:{code}"
-                    if cache_key in processed_otps:
-                        return
-                    processed_otps[cache_key] = time.time()
+                    cost_str = row.get("cost") or ""
+                    price_tag = f" | {EMOJI_CARD} <code>{cost_str}</code>" if cost_str else ""
 
-                    text = f"{EMOJI_FLAG} <b>Telegram</b> <code>{clean_p}</code>"
-                    msg_id = row.get("message_id")
+                    text = f'{EMOJI_FLAG} Number: <code>+{phone}</code>{price_tag}\n{EMOJI_CARD} OTP: <code>{code}</code>'
+                    msg_id = row["message_id"]
                     if msg_id:
                         await bot.edit_message_text(
                             text=text, chat_id=chat_id, message_id=msg_id,
@@ -398,7 +370,7 @@ async def poll_sms(bot, chat_id: int, activation_id: str, phone: str, client: He
                     await db.increment_user_stats(chat_id, otps=1)
                     
                     # Live forward to Monitoring Group
-                    await forward_to_log_group(bot, chat_id, clean_p, activation_id, code)
+                    await forward_to_log_group(bot, chat_id, phone, activation_id, code)
 
                     await client.set_status(activation_id, 6)
                     await db.delete_activation(activation_id)
@@ -593,7 +565,157 @@ async def text_balance(message: Message):
         else:
             await message.answer(f'{EMOJI_CROSS} Error fetching balance.')
 
-# --- Unified Single-Message Bulk Purchase System ---
+# --- Exact Number Purchase Engine (Restored Original Layout from Screenshot) ---
+async def buy_single_number_process(bot, user_id: int, chat_id: int, service: str, country_id: int, client: HeroSMSClient):
+    active_op = await get_active_operator()
+    active_price = await get_active_max_price()
+    excluded_prefixes = await get_active_prefixes()
+    
+    phone_exception_str = ",".join(excluded_prefixes[:20]) if excluded_prefixes else None
+
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            res = await asyncio.wait_for(
+                client.get_number(
+                    service=service,
+                    country=country_id,
+                    max_price=active_price,
+                    phone_exception=phone_exception_str,
+                    operator=active_op
+                ),
+                timeout=9.0
+            )
+        except asyncio.TimeoutError:
+            await bot.send_message(chat_id, f'{EMOJI_WARN} HeroSMS API response timed out. Skipping...')
+            return False
+        except Exception as e:
+            await bot.send_message(chat_id, f'{EMOJI_WARN} Error contacting HeroSMS: {e}')
+            return False
+
+        if not isinstance(res, dict) or "activationId" not in res:
+            err = res.get("title", str(res)) if isinstance(res, dict) else str(res)
+            await bot.send_message(chat_id, f'Failed to buy number: {html.escape(str(err))}')
+            return False
+
+        aid = str(res["activationId"])
+        phone = str(res.get("phoneNumber", "Unknown"))
+
+        # In-script double check for excluded prefixes
+        if is_prefix_excluded(phone, excluded_prefixes):
+            try:
+                await client.set_status(aid, 8)
+            except Exception:
+                pass
+            await asyncio.sleep(0.4)
+            continue
+
+        break
+    else:
+        await bot.send_message(chat_id, f"{EMOJI_WARN} Could not obtain number without excluded prefix after {max_retries} retries.")
+        return False
+
+    await db.increment_user_stats(user_id, purchased=1)
+
+    # Cost calculation
+    cost_val = res.get("cost")
+    cost_str = f"${float(cost_val):.3f}" if cost_val is not None else f"${active_price:.3f}"
+
+    status_emoji = EMOJI_TICK
+    is_fresh = True
+    badge = "Fresh"
+
+    try:
+        check_res = await asyncio.wait_for(check_telegram_numbers([phone]), timeout=5.0)
+        if isinstance(check_res, dict):
+            badge, is_fresh = format_tg_status(check_res.get(f"+{phone}") or check_res.get(phone))
+            if is_fresh:
+                status_emoji = EMOJI_TICK
+            elif any(x in badge for x in ["Banned", "Ban"]):
+                status_emoji = EMOJI_BAN
+            elif any(x in badge for x in ["Registered", "Occupied"]):
+                status_emoji = EMOJI_CROSS
+            elif any(x in badge for x in ["Locked", "Flood"]):
+                status_emoji = EMOJI_LOCK
+            else:
+                status_emoji = EMOJI_WARN
+    except Exception as e:
+        logging.warning(f"Checker skipped for {phone}: {e}")
+        status_emoji = EMOJI_WARN
+
+    # Exact screenshot card layout
+    msg = await bot.send_message(
+        chat_id,
+        f'{EMOJI_FLAG} Number: <code>+{phone}</code> {status_emoji}\n{EMOJI_CARD} OTP: Waiting for SMS...',
+        reply_markup=kb.number_action_menu(aid),
+        parse_mode="HTML"
+    )
+
+    await db.save_activation(aid, user_id, phone, msg.message_id, cost=cost_str)
+
+    if not is_fresh and any(x in badge for x in ["Registered", "Banned", "Locked"]):
+        # Silent auto-cancel without spam
+        asyncio.create_task(auto_cancel_bad_number_worker(client, aid, phone, user_id))
+    else:
+        asyncio.create_task(poll_sms(bot, chat_id, aid, phone, client))
+
+    return True
+
+@router.callback_query(F.data.startswith("refresh_"))
+async def cb_refresh_sms(callback: CallbackQuery):
+    aid = callback.data[len("refresh_"):]
+    user = await get_cached_user(callback.from_user.id)
+    if not user or not user.get("api_key"):
+        return
+    async with ChatActionSender.typing(bot=callback.bot, chat_id=callback.message.chat.id):
+        client = HeroSMSClient(user["api_key"])
+        res = await client.get_status(aid)
+
+        if isinstance(res, str):
+            if res.startswith("STATUS_OK:"):
+                code = res.split(":", 1)[1]
+                row = await db.get_activation(aid)
+                phone = row["phone"] if row else "Unknown"
+                cost_str = row.get("cost") or ""
+                price_tag = f" | {EMOJI_CARD} <code>{cost_str}</code>" if cost_str else ""
+                
+                await callback.message.edit_text(
+                    f'{EMOJI_FLAG} Number: <code>+{phone}</code>{price_tag}\n{EMOJI_CARD} OTP: <code>{code}</code>',
+                    reply_markup=kb.otp_copy_menu(code),
+                    parse_mode="HTML"
+                )
+                await db.increment_user_stats(callback.from_user.id, otps=1)
+                await forward_to_log_group(callback.bot, callback.from_user.id, phone, aid, code)
+                await client.set_status(aid, 6)
+                await db.delete_activation(aid)
+                await callback.answer("OTP Received!")
+            elif res.startswith("STATUS_WAIT_CODE"):
+                await callback.answer("Still waiting for OTP...", show_alert=True)
+            elif res.startswith("STATUS_CANCEL"):
+                await db.delete_activation(aid)
+                await callback.message.edit_text("Activation cancelled.")
+            else:
+                await callback.answer(f"Status: {res}", show_alert=True)
+        else:
+            await callback.answer("Error checking status.", show_alert=True)
+
+@router.callback_query(F.data.startswith("single_cancel_"))
+async def cb_cancel_single(callback: CallbackQuery):
+    aid = callback.data[len("single_cancel_"):]
+    user = await get_cached_user(callback.from_user.id)
+    if not user or not user.get("api_key"):
+        return
+    client = HeroSMSClient(user["api_key"])
+    res = await client.set_status(aid, 8)
+    if isinstance(res, str) and (res.startswith("ACCESS_CANCEL") or res.startswith("STATUS_CANCEL")):
+        await db.delete_activation(aid)
+        await callback.message.edit_text("Cancelled. Balance refunded.")
+    elif isinstance(res, str) and "EARLY_CANCEL_DENIED" in res:
+        await callback.answer("Cannot cancel within first 2 minutes. Auto-refund worker active.", show_alert=True)
+    else:
+        err = res.get("title", str(res)) if isinstance(res, dict) else str(res)
+        await callback.answer(f"Error: {err}", show_alert=True)
+
 @router.message(F.text == "Bulk Buy Numbers")
 async def text_bulk_buy(message: Message, state: FSMContext):
     if not await is_allowed(message.from_user.id):
@@ -625,210 +747,18 @@ async def process_bulk_amount(message: Message, state: FSMContext):
         return await message.answer("Please set your API key first.")
 
     client = HeroSMSClient(user["api_key"])
-    active_op = await get_active_operator()
-    active_price = await get_active_max_price()
-    excluded_prefixes = await get_active_prefixes()
-    phone_exception_str = ",".join(excluded_prefixes[:20]) if excluded_prefixes else None
-
-    status_msg = await message.answer(f'{EMOJI_PLANE} Purchasing {amount} numbers... please wait.')
-
-    purchased_items = []
-    failed_count = 0
+    await message.answer(f'{EMOJI_PLANE} Starting bulk purchase of {amount} numbers...', parse_mode="HTML")
 
     for i in range(amount):
-        res = None
-        for attempt in range(3):
-            try:
-                res = await client.get_number(
-                    service=TG_SERVICE,
-                    country=COLOMBIA_ID,
-                    max_price=active_price,
-                    phone_exception=phone_exception_str,
-                    operator=active_op
-                )
-                if isinstance(res, dict) and "activationId" in res:
-                    break
-            except Exception:
-                pass
-            await asyncio.sleep(0.6)
-
-        if isinstance(res, dict) and "activationId" in res:
-            aid = str(res["activationId"])
-            phone = str(res.get("phoneNumber", "Unknown"))
-            clean_phone = phone.lstrip("+").strip()
-            
-            cost_val = res.get("cost")
-            if cost_val is not None:
-                cost_str = f"${float(cost_val):.3f}"
-            else:
-                cost_str = f"${active_price:.3f}"
-
-            purchased_items.append({
-                "aid": aid,
-                "phone": clean_phone,
-                "cost": cost_str
-            })
-
-            await db.save_activation(aid, message.from_user.id, clean_phone, cost=cost_str)
-            await db.increment_user_stats(message.from_user.id, purchased=1)
-
-            asyncio.create_task(poll_sms(message.bot, message.chat.id, aid, clean_phone, client))
-        else:
-            failed_count = amount - len(purchased_items)
-            break
-        await asyncio.sleep(0.2)
-
-    if not purchased_items:
-        return await status_msg.edit_text(
-            f"{EMOJI_CROSS} <b>Purchase Failed:</b> Could not obtain any numbers (Stock empty or rate exceeded).",
-            parse_mode="HTML"
+        success = await buy_single_number_process(
+            message.bot, message.from_user.id, message.chat.id,
+            TG_SERVICE, COLOMBIA_ID, client
         )
+        if not success:
+            await message.answer(f"Stopped bulk purchase at item #{i+1}.")
+            break
+        await asyncio.sleep(0.3)
 
-    await status_msg.edit_text(f"{EMOJI_PLANE} Checking Telegram status for {len(purchased_items)} numbers...")
-
-    phone_list = [item["phone"] for item in purchased_items]
-    check_results = await check_telegram_numbers(phone_list)
-
-    fresh_items = []
-    bad_items = []
-
-    for item in purchased_items:
-        p = item["phone"]
-        aid = item["aid"]
-        cost = item["cost"]
-        op = get_colombia_operator(p)
-
-        raw_st = check_results.get(f"+{p}") or check_results.get(p)
-        badge, is_fresh = format_tg_status(raw_st)
-
-        item_data = {
-            "phone": p,
-            "aid": aid,
-            "cost": cost,
-            "operator": op,
-            "badge": badge,
-            "is_fresh": is_fresh
-        }
-
-        if is_fresh:
-            fresh_items.append(item_data)
-        else:
-            bad_items.append(item_data)
-            asyncio.create_task(silent_auto_cancel_worker(client, aid))
-
-    batch_id = str(uuid.uuid4())[:8]
-    bulk_sessions_cache[batch_id] = {
-        "amount": amount,
-        "purchased_count": len(purchased_items),
-        "failed_count": failed_count,
-        "fresh_items": fresh_items,
-        "bad_items": bad_items,
-        "created_at": time.time()
-    }
-
-    lines = [
-        f"{EMOJI_BOX} <b>Bulk Order Status:</b>\n",
-        f"{EMOJI_TICK} Successfully Delivered: <b>{len(purchased_items)}/{amount}</b>"
-    ]
-    if failed_count > 0:
-        lines.append(f"{EMOJI_WARN} Failed / No Stock: <b>{failed_count}</b>")
-
-    lines.append(f"\n{EMOJI_FLAG} <b>Fresh: {len(fresh_items)}</b> | {EMOJI_CROSS} <b>Bad: {len(bad_items)}</b>\n")
-
-    if fresh_items:
-        lines.append(f"🟢 <b>Fresh Numbers ({len(fresh_items)}):</b>")
-        for idx, fi in enumerate(fresh_items, 1):
-            lines.append(f"{idx}. <code>+{fi['phone']}</code> ({fi['operator']}) | {EMOJI_CARD} <b>{fi['cost']}</b> — {fi['badge']}")
-        lines.append("")
-
-    if bad_items:
-        lines.append(f"🔻 <b>Bad / Unavailable ({len(bad_items)}) (Auto-Refunding):</b>")
-        for idx, bi in enumerate(bad_items, 1):
-            lines.append(f"{idx}. <code>+{bi['phone']}</code> ({bi['operator']}) | {EMOJI_CARD} <b>{bi['cost']}</b> — {bi['badge']}")
-        lines.append("")
-
-    lines.append(f"<i>Waiting for OTPs... tap on fresh numbers to copy!</i>")
-    report_text = "\n".join(lines)
-
-    await status_msg.edit_text(
-        report_text,
-        reply_markup=kb.bulk_report_menu(batch_id, show_only_fresh=False),
-        parse_mode="HTML"
-    )
-
-# --- Toggle View: Show Only Fresh or All ---
-@router.callback_query(F.data.startswith("filter_fresh_"))
-async def cb_filter_fresh_numbers(callback: CallbackQuery):
-    batch_id = callback.data[len("filter_fresh_"):]
-    session = bulk_sessions_cache.get(batch_id)
-    if not session:
-        return await callback.answer("Session expired.", show_alert=True)
-
-    fresh_items = session["fresh_items"]
-    lines = [
-        f"{EMOJI_BOX} <b>Fresh Numbers Filtered View:</b>\n",
-        f"{EMOJI_TICK} Total Fresh Available: <b>{len(fresh_items)}</b>\n"
-    ]
-
-    if fresh_items:
-        for idx, fi in enumerate(fresh_items, 1):
-            lines.append(f"{idx}. <code>+{fi['phone']}</code> ({fi['operator']}) | {EMOJI_CARD} <b>{fi['cost']}</b> — {fi['badge']}")
-    else:
-        lines.append(f"{EMOJI_WARN} No fresh numbers found in this batch.")
-
-    lines.append(f"\n<i>Bad numbers filtered out. Tap numbers above to copy!</i>")
-    text = "\n".join(lines)
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=kb.bulk_report_menu(batch_id, show_only_fresh=True),
-        parse_mode="HTML"
-    )
-
-@router.callback_query(F.data.startswith("filter_all_"))
-async def cb_filter_all_numbers(callback: CallbackQuery):
-    batch_id = callback.data[len("filter_all_"):]
-    session = bulk_sessions_cache.get(batch_id)
-    if not session:
-        return await callback.answer("Session expired.", show_alert=True)
-
-    amount = session["amount"]
-    purchased_count = session["purchased_count"]
-    failed_count = session["failed_count"]
-    fresh_items = session["fresh_items"]
-    bad_items = session["bad_items"]
-
-    lines = [
-        f"{EMOJI_BOX} <b>Bulk Order Status:</b>\n",
-        f"{EMOJI_TICK} Successfully Delivered: <b>{purchased_count}/{amount}</b>"
-    ]
-    if failed_count > 0:
-        lines.append(f"{EMOJI_WARN} Failed / No Stock: <b>{failed_count}</b>")
-
-    lines.append(f"\n{EMOJI_FLAG} <b>Fresh: {len(fresh_items)}</b> | {EMOJI_CROSS} <b>Bad: {len(bad_items)}</b>\n")
-
-    if fresh_items:
-        lines.append(f"🟢 <b>Fresh Numbers ({len(fresh_items)}):</b>")
-        for idx, fi in enumerate(fresh_items, 1):
-            lines.append(f"{idx}. <code>+{fi['phone']}</code> ({fi['operator']}) | {EMOJI_CARD} <b>{fi['cost']}</b> — {fi['badge']}")
-        lines.append("")
-
-    if bad_items:
-        lines.append(f"🔻 <b>Bad / Unavailable ({len(bad_items)}) (Auto-Refunding):</b>")
-        for idx, bi in enumerate(bad_items, 1):
-            lines.append(f"{idx}. <code>+{bi['phone']}</code> ({bi['operator']}) | {EMOJI_CARD} <b>{bi['cost']}</b> — {bi['badge']}")
-        lines.append("")
-
-    lines.append(f"<i>Waiting for OTPs... tap on fresh numbers to copy!</i>")
-    text = "\n".join(lines)
-
-    await callback.message.edit_text(
-        text,
-        reply_markup=kb.bulk_report_menu(batch_id, show_only_fresh=False),
-        parse_mode="HTML"
-    )
-
-# --- Active Numbers ---
 @router.message(F.text == "Active Numbers")
 async def text_active_numbers(message: Message):
     if not await is_allowed(message.from_user.id):
@@ -863,7 +793,7 @@ async def cb_cancel_all_active(callback: CallbackQuery):
     if not activations:
         return await callback.answer("No active numbers to cancel.", show_alert=True)
 
-    await callback.message.edit_text(f"{EMOJI_PLANE} Cancelling {len(activations)} numbers... please wait.", parse_mode="HTML")
+    await callback.message.edit_text(f"Cancelling {len(activations)} numbers... please wait.")
 
     async def cancel_one(act):
         aid = str(act.get("activationId", ""))
@@ -880,7 +810,7 @@ async def cb_cancel_all_active(callback: CallbackQuery):
 
     results = await asyncio.gather(*[cancel_one(a) for a in activations])
     ok = sum(1 for x in results if x)
-    await callback.message.edit_text(f"{EMOJI_TICK} Cancelled {ok}/{len(activations)} numbers. Balance refunded.", parse_mode="HTML")
+    await callback.message.edit_text(f"Cancelled {ok}/{len(activations)} numbers. Balance refunded.")
 
 @router.callback_query(F.data.startswith("active_cancel_"))
 async def cb_active_cancel(callback: CallbackQuery):
@@ -920,95 +850,6 @@ async def back_to_user_menu(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
     await message.answer(f'{EMOJI_PLANE} Switched back to User Menu:', reply_markup=kb.main_reply_menu(), parse_mode="HTML")
-
-# --- Live Stock Check & Manual Broadcast ---
-@router.message(F.text == "📦 Check Live Stock")
-async def admin_check_live_stock(message: Message):
-    global LATEST_STOCK_REPORT
-    if message.from_user.id != ADMIN_ID:
-        return
-
-    admin_user = await get_cached_user(ADMIN_ID)
-    if not admin_user or not admin_user.get("api_key"):
-        return await message.answer(f'{EMOJI_WARN} Admin API Key is not set! Set your key using /start or Profile first.', parse_mode="HTML")
-
-    async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
-        client = HeroSMSClient(admin_user["api_key"])
-        prices_res = await client.get_prices(country=COLOMBIA_ID, service=TG_SERVICE)
-
-        if not isinstance(prices_res, dict):
-            return await message.answer(f'{EMOJI_CROSS} Failed to fetch prices from HeroSMS API.', parse_mode="HTML")
-
-        c_dict = {}
-        if str(COLOMBIA_ID) in prices_res:
-            c_dict = prices_res[str(COLOMBIA_ID)].get(TG_SERVICE, {})
-        elif TG_SERVICE in prices_res:
-            c_dict = prices_res[TG_SERVICE]
-        else:
-            c_dict = prices_res
-
-        common_ops = ["claro", "movistar", "tigo", "wom", "virgin", "exito", "flash"]
-        found_ops = {}
-
-        if isinstance(c_dict, dict):
-            for op_name, op_val in c_dict.items():
-                if isinstance(op_val, dict):
-                    cnt = int(op_val.get("count", op_val.get("amount", 0)))
-                    prc = float(op_val.get("cost", op_val.get("price", 0.0)))
-                    found_ops[op_name.lower()] = {"count": cnt, "cost": prc}
-
-        lines = [f'{EMOJI_FLAG} <b>Live Colombia Telegram Stock:</b>\n']
-        total_available = 0
-
-        for op, data in found_ops.items():
-            cnt = data["count"]
-            cost = data["cost"]
-            total_available += cnt
-            badge = EMOJI_TICK if cnt > 0 else EMOJI_CROSS
-            cost_str = f"${cost:.3f}" if cost > 0 else "N/A"
-            lines.append(f"{badge} <b>{op.upper()}</b>: <b>{cnt} pcs</b> | Rate: <code>{cost_str}</code>")
-
-        for op in common_ops:
-            if op not in found_ops:
-                lines.append(f'{EMOJI_CROSS} <b>{op.upper()}</b>: <b>0 pcs</b> | Rate: <code>Out of stock</code>')
-
-        lines.append(f'\n{EMOJI_BOX} <b>Total Stock:</b> <code>{total_available} numbers</code>')
-        report_text = "\n".join(lines)
-        LATEST_STOCK_REPORT = report_text
-
-        await message.answer(report_text, reply_markup=kb.stock_broadcast_menu(), parse_mode="HTML")
-
-@router.callback_query(F.data == "broadcast_live_stock")
-async def cb_broadcast_live_stock(callback: CallbackQuery):
-    global LATEST_STOCK_REPORT
-    if callback.from_user.id != ADMIN_ID:
-        return await callback.answer("Unauthorized", show_alert=True)
-
-    if not LATEST_STOCK_REPORT:
-        return await callback.answer("No stock report available to broadcast.", show_alert=True)
-
-    users = await db.get_approved_users()
-    if not users:
-        return await callback.answer("No approved users found.", show_alert=True)
-
-    await callback.answer("Broadcasting stock alert to users...", show_alert=False)
-
-    msg_to_send = (
-        f'{EMOJI_SIREN} <b>LIVE STOCK UPDATE!</b>\n\n'
-        f'{LATEST_STOCK_REPORT}\n\n'
-        f'{EMOJI_TICK} <i>Go to "Bulk Buy Numbers" to purchase now!</i>'
-    )
-
-    sent = 0
-    for u in users:
-        try:
-            await callback.bot.send_message(u["user_id"], msg_to_send, parse_mode="HTML")
-            sent += 1
-            await asyncio.sleep(0.04)
-        except Exception:
-            pass
-
-    await callback.message.reply(f'{EMOJI_TICK} Stock alert broadcasted to <b>{sent}</b> active users!', parse_mode="HTML")
 
 # --- Dynamic Buy Config (Operator / Price) ---
 @router.message(F.text == "⚙️ Buy Config (Operator/Price)")
