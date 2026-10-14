@@ -6,17 +6,14 @@ from datetime import datetime, timezone, timedelta
 DATABASE_URL = os.getenv("DATABASE_URL")
 pool = None
 
-
 async def get_pool():
     global pool
     if pool is None:
         if not DATABASE_URL:
             raise ValueError("DATABASE_URL environment variable is missing!")
 
-        # Asyncpg-er jonno clean postgresql:// format toiri kora
         url = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
 
-        # Supabase Pooler-er IPv4 connection SSL context
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -24,16 +21,14 @@ async def get_pool():
         pool = await asyncpg.create_pool(
             url,
             min_size=1,
-            max_size=5,
+            max_size=10,
             ssl=ctx
         )
     return pool
 
-
 async def init_db():
     p = await get_pool()
     async with p.acquire() as conn:
-        # PostgreSQL schema with auto-creation
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -49,6 +44,16 @@ async def init_db():
             )
         """)
 
+        # User Daily OTP Tracking Table (Auto resets at UTC midnight)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_daily_stats (
+                user_id BIGINT,
+                stat_date DATE,
+                otps_count INT DEFAULT 0,
+                PRIMARY KEY (user_id, stat_date)
+            )
+        """)
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
@@ -61,16 +66,22 @@ async def init_db():
                 activation_id TEXT PRIMARY KEY,
                 user_id BIGINT,
                 phone TEXT,
-                message_id BIGINT
+                message_id BIGINT,
+                cost TEXT
             )
         """)
+        
+        # Schema migration check
+        try:
+            await conn.execute("ALTER TABLE activations ADD COLUMN IF NOT EXISTS cost TEXT")
+        except Exception:
+            pass
 
         await conn.execute("""
             INSERT INTO settings (key, value) 
             VALUES ('maintenance', '0'), ('restock_monitor', '1')
             ON CONFLICT (key) DO NOTHING
         """)
-
 
 async def add_user(user_id: int, username: str = None, full_name: str = None, is_approved: int = 0):
     p = await get_pool()
@@ -84,13 +95,11 @@ async def add_user(user_id: int, username: str = None, full_name: str = None, is
             user_id, username, full_name, is_approved
         )
 
-
 async def get_user(user_id: int):
     p = await get_pool()
     async with p.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
         return dict(row) if row else None
-
 
 async def get_all_users():
     p = await get_pool()
@@ -98,13 +107,11 @@ async def get_all_users():
         rows = await conn.fetch("SELECT user_id FROM users")
         return [r["user_id"] for r in rows]
 
-
 async def get_approved_users():
     p = await get_pool()
     async with p.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM users WHERE is_approved = 1")
+        rows = await conn.fetch("SELECT * FROM users WHERE is_approved = 1 AND is_banned = 0")
         return [dict(r) for r in rows]
-
 
 async def set_user_subscription(user_id: int, days: int = None):
     p = await get_pool()
@@ -119,7 +126,6 @@ async def set_user_subscription(user_id: int, days: int = None):
             "UPDATE users SET is_approved = 1, expiry_date = $1 WHERE user_id = $2",
             expiry_str, user_id
         )
-
 
 async def extend_user_subscription(user_id: int, extra_days: int):
     user = await get_user(user_id)
@@ -146,7 +152,6 @@ async def extend_user_subscription(user_id: int, extra_days: int):
         )
     return new_exp
 
-
 async def set_approval_status(user_id: int, is_approved: bool):
     p = await get_pool()
     async with p.acquire() as conn:
@@ -154,7 +159,6 @@ async def set_approval_status(user_id: int, is_approved: bool):
             "UPDATE users SET is_approved = $1 WHERE user_id = $2",
             1 if is_approved else 0, user_id
         )
-
 
 async def increment_user_stats(user_id: int, purchased: int = 0, otps: int = 0):
     p = await get_pool()
@@ -167,12 +171,34 @@ async def increment_user_stats(user_id: int, purchased: int = 0, otps: int = 0):
             purchased, otps, user_id
         )
 
+async def record_user_daily_otp(user_id: int) -> int:
+    """UTC raat 12:00 tar por auto reset hoye daily OTP count 1-e set hobe ebong return korbe"""
+    today_utc = datetime.now(timezone.utc).date()
+    p = await get_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO user_daily_stats (user_id, stat_date, otps_count)
+            VALUES ($1, $2, 1)
+            ON CONFLICT (user_id, stat_date)
+            DO UPDATE SET otps_count = user_daily_stats.otps_count + 1
+            RETURNING otps_count
+        """, user_id, today_utc)
+        return row["otps_count"] if row else 1
+
+async def get_user_daily_otp(user_id: int) -> int:
+    today_utc = datetime.now(timezone.utc).date()
+    p = await get_pool()
+    async with p.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT otps_count FROM user_daily_stats WHERE user_id = $1 AND stat_date = $2",
+            user_id, today_utc
+        )
+        return row["otps_count"] if row else 0
 
 async def update_api_key(user_id: int, api_key: str):
     p = await get_pool()
     async with p.acquire() as conn:
         await conn.execute("UPDATE users SET api_key = $1 WHERE user_id = $2", api_key, user_id)
-
 
 async def set_ban_status(user_id: int, is_banned: bool):
     p = await get_pool()
@@ -182,13 +208,11 @@ async def set_ban_status(user_id: int, is_banned: bool):
             1 if is_banned else 0, user_id
         )
 
-
 async def get_setting(key: str):
     p = await get_pool()
     async with p.acquire() as conn:
         row = await conn.fetchrow("SELECT value FROM settings WHERE key = $1", key)
         return row["value"] if row else None
-
 
 async def set_setting(key: str, value: str):
     p = await get_pool()
@@ -199,25 +223,22 @@ async def set_setting(key: str, value: str):
             key, value
         )
 
-
-async def save_activation(activation_id: str, user_id: int, phone: str, message_id: int = None):
+async def save_activation(activation_id: str, user_id: int, phone: str, message_id: int = None, cost: str = None):
     p = await get_pool()
     async with p.acquire() as conn:
         await conn.execute(
-            """INSERT INTO activations (activation_id, user_id, phone, message_id) 
-               VALUES ($1, $2, $3, $4)
+            """INSERT INTO activations (activation_id, user_id, phone, message_id, cost) 
+               VALUES ($1, $2, $3, $4, $5)
                ON CONFLICT (activation_id) DO UPDATE SET 
-               user_id = $2, phone = $3, message_id = $4""",
-            str(activation_id), user_id, phone, message_id
+               user_id = $2, phone = $3, message_id = $4, cost = $5""",
+            str(activation_id), user_id, phone, message_id, cost
         )
-
 
 async def get_activation(activation_id: str):
     p = await get_pool()
     async with p.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM activations WHERE activation_id = $1", str(activation_id))
         return dict(row) if row else None
-
 
 async def delete_activation(activation_id: str):
     p = await get_pool()
