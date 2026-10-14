@@ -293,7 +293,8 @@ async def background_check_and_update(bot, chat_id: int, message_id: int, aid: s
 
         # Exact Rate & Status Badge updated in Card UI
         card_text = (
-            f"{EMOJI_FLAG} Number: <code>+{phone}</code> {status_emoji} | Rate: <code>{cost_str}</code>\n"
+            f"{EMOJI_FLAG} Number: <code>+{phone}</code> {status_emoji}\n"
+            f"{EMOJI_CARD} Rate: <code>{cost_str}</code>\nn"
             f"{EMOJI_CARD} OTP: Waiting for SMS..."
         )
         try:
