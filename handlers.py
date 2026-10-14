@@ -164,12 +164,66 @@ async def silent_auto_cancel_worker(client: HeroSMSClient, aid: str):
     except Exception:
         pass
 
+# Restock Monitor Background Worker (Imported by bot.py)
+async def start_restock_monitor():
+    await asyncio.sleep(15)
+    first_run = True
+    while True:
+        try:
+            is_enabled = await get_cached_setting("restock_monitor", "0")
+            if is_enabled == "1":
+                admin_user = await get_cached_user(ADMIN_ID)
+                if admin_user and admin_user.get("api_key"):
+                    client = HeroSMSClient(admin_user["api_key"])
+                    prices_res = await client.get_prices(country=COLOMBIA_ID, service=TG_SERVICE)
+                    
+                    if isinstance(prices_res, dict):
+                        c_dict = {}
+                        if str(COLOMBIA_ID) in prices_res:
+                            c_dict = prices_res[str(COLOMBIA_ID)].get(TG_SERVICE, {})
+                        elif TG_SERVICE in prices_res:
+                            c_dict = prices_res[TG_SERVICE]
+                        else:
+                            c_dict = prices_res
+
+                        if isinstance(c_dict, dict):
+                            for op, d in c_dict.items():
+                                if isinstance(d, dict):
+                                    cnt = int(d.get("count", d.get("amount", 0)))
+                                    prc = float(d.get("cost", d.get("price", 0.0)))
+                                    prev_count = last_known_stocks.get(op, 0)
+
+                                    is_initial_stock = first_run and cnt >= 5
+                                    is_stock_increased = (cnt - prev_count) >= 5
+
+                                    if (is_initial_stock or is_stock_increased) and prc <= 0.145:
+                                        approved = await db.get_approved_users()
+                                        bot = get_bot_instance()
+                                        if bot:
+                                            msg_text = (
+                                                f'{EMOJI_SIREN} <b>RESTOCK ALERT!</b>\n\n'
+                                                f'{EMOJI_FLAG} Operator: <b>{op.upper()}</b>\n'
+                                                f'{EMOJI_CARD} Price: <b>${prc:.3f}</b>\n'
+                                                f'{EMOJI_BOX} Available Stock: <b>{cnt} numbers</b>\n\n'
+                                                f'{EMOJI_TICK} Grab now from <b>Bulk Buy Numbers</b>!'
+                                            )
+                                            for u in approved:
+                                                try:
+                                                    await bot.send_message(u["user_id"], msg_text, parse_mode="HTML")
+                                                    await asyncio.sleep(0.04)
+                                                except Exception:
+                                                    pass
+                                    last_known_stocks[op] = cnt
+                            first_run = False
+        except Exception as e:
+            logging.error(f"Restock monitor error: {e}")
+        await asyncio.sleep(60)
+
 async def forward_to_log_group(bot, user_id: int, phone: str, aid: str, code: str):
     """Sends OTP directly to the monitoring group with live daily counter"""
     clean_p = str(phone).lstrip("+").strip()
     now_utc_str = datetime.now(timezone.utc).strftime("%I:%M:%S %p UTC")
     
-    # Track & increment daily OTP count (Resets at UTC midnight)
     daily_count = await db.record_user_daily_otp(user_id)
     
     group_msg = (
@@ -581,8 +635,6 @@ async def process_bulk_amount(message: Message, state: FSMContext):
     purchased_items = []
     failed_count = 0
 
-    init_bal = await client.get_balance()
-
     for i in range(amount):
         res = None
         for attempt in range(3):
@@ -605,7 +657,6 @@ async def process_bulk_amount(message: Message, state: FSMContext):
             phone = str(res.get("phoneNumber", "Unknown"))
             clean_phone = phone.lstrip("+").strip()
             
-            # Exact cost detection
             cost_val = res.get("cost")
             if cost_val is not None:
                 cost_str = f"${float(cost_val):.3f}"
@@ -621,7 +672,6 @@ async def process_bulk_amount(message: Message, state: FSMContext):
             await db.save_activation(aid, message.from_user.id, clean_phone, cost=cost_str)
             await db.increment_user_stats(message.from_user.id, purchased=1)
 
-            # Poller starts silently
             asyncio.create_task(poll_sms(message.bot, message.chat.id, aid, clean_phone, client))
         else:
             failed_count = amount - len(purchased_items)
@@ -636,7 +686,6 @@ async def process_bulk_amount(message: Message, state: FSMContext):
 
     await status_msg.edit_text(f"{EMOJI_PLANE} Checking Telegram status for {len(purchased_items)} numbers...")
 
-    # Telegram Checker Verification
     phone_list = [item["phone"] for item in purchased_items]
     check_results = await check_telegram_numbers(phone_list)
 
@@ -665,7 +714,6 @@ async def process_bulk_amount(message: Message, state: FSMContext):
             fresh_items.append(item_data)
         else:
             bad_items.append(item_data)
-            # Silent refund worker (no notification spam)
             asyncio.create_task(silent_auto_cancel_worker(client, aid))
 
     batch_id = str(uuid.uuid4())[:8]
@@ -678,7 +726,6 @@ async def process_bulk_amount(message: Message, state: FSMContext):
         "created_at": time.time()
     }
 
-    # Consolidated Single Report
     lines = [
         f"{EMOJI_BOX} <b>Bulk Order Status:</b>\n",
         f"{EMOJI_TICK} Successfully Delivered: <b>{len(purchased_items)}/{amount}</b>"
