@@ -134,7 +134,6 @@ def is_prefix_excluded(phone: str, prefixes: list) -> bool:
             return True
     return False
 
-# Background auto-cancel without spamming user
 async def auto_cancel_bad_number_worker(client: HeroSMSClient, aid: str, phone: str, user_id: int):
     await asyncio.sleep(125)
     try:
@@ -199,7 +198,6 @@ async def start_restock_monitor():
         await asyncio.sleep(60)
 
 async def forward_to_log_group(bot, user_id: int, phone: str, aid: str, code: str):
-    """Sends OTP directly to the monitoring group with live daily counter"""
     clean_p = str(phone).lstrip("+").strip()
     now_utc_str = datetime.now(timezone.utc).strftime("%I:%M:%S %p UTC")
     
@@ -272,6 +270,48 @@ async def is_allowed(user_id: int) -> bool:
         return False
     return True
 
+# --- Async Background Status Checker (Ultra Fast Non-Blocking) ---
+async def background_check_and_update(bot, chat_id: int, message_id: int, aid: str, phone: str, cost_str: str, client: HeroSMSClient, user_id: int):
+    try:
+        check_res = await asyncio.wait_for(check_telegram_numbers([phone]), timeout=5.0)
+        badge = "Fresh"
+        is_fresh = True
+        status_emoji = EMOJI_TICK
+
+        if isinstance(check_res, dict):
+            badge, is_fresh = format_tg_status(check_res.get(f"+{phone}") or check_res.get(phone))
+            if is_fresh:
+                status_emoji = EMOJI_TICK
+            elif any(x in badge for x in ["Banned", "Ban"]):
+                status_emoji = EMOJI_BAN
+            elif any(x in badge for x in ["Registered", "Occupied"]):
+                status_emoji = EMOJI_CROSS
+            elif any(x in badge for x in ["Locked", "Flood"]):
+                status_emoji = EMOJI_LOCK
+            else:
+                status_emoji = EMOJI_WARN
+
+        # Exact Rate & Status Badge updated in Card UI
+        card_text = (
+            f"{EMOJI_FLAG} Number: <code>+{phone}</code> {status_emoji} | Rate: <code>{cost_str}</code>\n"
+            f"{EMOJI_CARD} OTP: Waiting for SMS..."
+        )
+        try:
+            await bot.edit_message_text(
+                text=card_text,
+                chat_id=chat_id,
+                message_id=message_id,
+                reply_markup=kb.number_action_menu(aid),
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+        if not is_fresh and any(x in badge for x in ["Registered", "Banned", "Locked"]):
+            asyncio.create_task(auto_cancel_bad_number_worker(client, aid, phone, user_id))
+    except Exception as e:
+        logging.warning(f"Background check error for {phone}: {e}")
+
 # --- Webhook Handler ---
 async def handle_herosms_webhook(request):
     data = {}
@@ -303,7 +343,7 @@ async def handle_herosms_webhook(request):
             phone = row["phone"]
             msg_id = row["message_id"]
             cost_str = row.get("cost") or ""
-            price_tag = f" | {EMOJI_CARD} <code>{cost_str}</code>" if cost_str else ""
+            price_tag = f" | Rate: <code>{cost_str}</code>" if cost_str else ""
             
             text = f'{EMOJI_FLAG} Number: <code>+{phone}</code>{price_tag}\n{EMOJI_CARD} OTP: <code>{code}</code>'
             bot = get_bot_instance()
@@ -323,8 +363,6 @@ async def handle_herosms_webhook(request):
                         )
 
                     await db.increment_user_stats(user_id, otps=1)
-                    
-                    # Live forward to Monitoring Group
                     await forward_to_log_group(bot, user_id, phone, aid, code)
 
                     user = await get_cached_user(user_id)
@@ -350,7 +388,7 @@ async def poll_sms(bot, chat_id: int, activation_id: str, phone: str, client: He
                 if res.startswith("STATUS_OK:"):
                     code = res.split(":", 1)[1]
                     cost_str = row.get("cost") or ""
-                    price_tag = f" | {EMOJI_CARD} <code>{cost_str}</code>" if cost_str else ""
+                    price_tag = f" | Rate: <code>{cost_str}</code>" if cost_str else ""
 
                     text = f'{EMOJI_FLAG} Number: <code>+{phone}</code>{price_tag}\n{EMOJI_CARD} OTP: <code>{code}</code>'
                     msg_id = row["message_id"]
@@ -368,8 +406,6 @@ async def poll_sms(bot, chat_id: int, activation_id: str, phone: str, client: He
                         )
 
                     await db.increment_user_stats(chat_id, otps=1)
-                    
-                    # Live forward to Monitoring Group
                     await forward_to_log_group(bot, chat_id, phone, activation_id, code)
 
                     await client.set_status(activation_id, 6)
@@ -565,7 +601,7 @@ async def text_balance(message: Message):
         else:
             await message.answer(f'{EMOJI_CROSS} Error fetching balance.')
 
-# --- Exact Number Purchase Engine (Restored Original Layout from Screenshot) ---
+# --- Exact Number Purchase Process with Instant Delivery ---
 async def buy_single_number_process(bot, user_id: int, chat_id: int, service: str, country_id: int, client: HeroSMSClient):
     active_op = await get_active_operator()
     active_price = await get_active_max_price()
@@ -573,7 +609,7 @@ async def buy_single_number_process(bot, user_id: int, chat_id: int, service: st
     
     phone_exception_str = ",".join(excluded_prefixes[:20]) if excluded_prefixes else None
 
-    max_retries = 5
+    max_retries = 3
     for attempt in range(max_retries):
         try:
             res = await asyncio.wait_for(
@@ -584,80 +620,49 @@ async def buy_single_number_process(bot, user_id: int, chat_id: int, service: st
                     phone_exception=phone_exception_str,
                     operator=active_op
                 ),
-                timeout=9.0
+                timeout=6.0
             )
-        except asyncio.TimeoutError:
-            await bot.send_message(chat_id, f'{EMOJI_WARN} HeroSMS API response timed out. Skipping...')
-            return False
-        except Exception as e:
-            await bot.send_message(chat_id, f'{EMOJI_WARN} Error contacting HeroSMS: {e}')
+        except Exception:
             return False
 
         if not isinstance(res, dict) or "activationId" not in res:
-            err = res.get("title", str(res)) if isinstance(res, dict) else str(res)
-            await bot.send_message(chat_id, f'Failed to buy number: {html.escape(str(err))}')
             return False
 
         aid = str(res["activationId"])
         phone = str(res.get("phoneNumber", "Unknown"))
 
-        # In-script double check for excluded prefixes
         if is_prefix_excluded(phone, excluded_prefixes):
             try:
                 await client.set_status(aid, 8)
             except Exception:
                 pass
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.2)
             continue
 
         break
     else:
-        await bot.send_message(chat_id, f"{EMOJI_WARN} Could not obtain number without excluded prefix after {max_retries} retries.")
         return False
 
     await db.increment_user_stats(user_id, purchased=1)
 
-    # Cost calculation
+    # HeroSMS Exact Rate
     cost_val = res.get("cost")
     cost_str = f"${float(cost_val):.3f}" if cost_val is not None else f"${active_price:.3f}"
 
-    status_emoji = EMOJI_TICK
-    is_fresh = True
-    badge = "Fresh"
-
-    try:
-        check_res = await asyncio.wait_for(check_telegram_numbers([phone]), timeout=5.0)
-        if isinstance(check_res, dict):
-            badge, is_fresh = format_tg_status(check_res.get(f"+{phone}") or check_res.get(phone))
-            if is_fresh:
-                status_emoji = EMOJI_TICK
-            elif any(x in badge for x in ["Banned", "Ban"]):
-                status_emoji = EMOJI_BAN
-            elif any(x in badge for x in ["Registered", "Occupied"]):
-                status_emoji = EMOJI_CROSS
-            elif any(x in badge for x in ["Locked", "Flood"]):
-                status_emoji = EMOJI_LOCK
-            else:
-                status_emoji = EMOJI_WARN
-    except Exception as e:
-        logging.warning(f"Checker skipped for {phone}: {e}")
-        status_emoji = EMOJI_WARN
-
-    # Exact screenshot card layout
+    # Send card immediately to screen (Instant Delivery)
     msg = await bot.send_message(
         chat_id,
-        f'{EMOJI_FLAG} Number: <code>+{phone}</code> {status_emoji}\n{EMOJI_CARD} OTP: Waiting for SMS...',
+        f'{EMOJI_FLAG} Number: <code>+{phone}</code> | Rate: <code>{cost_str}</code>\n{EMOJI_CARD} OTP: Waiting for SMS...',
         reply_markup=kb.number_action_menu(aid),
         parse_mode="HTML"
     )
 
     await db.save_activation(aid, user_id, phone, msg.message_id, cost=cost_str)
 
-    if not is_fresh and any(x in badge for x in ["Registered", "Banned", "Locked"]):
-        # Silent auto-cancel without spam
-        asyncio.create_task(auto_cancel_bad_number_worker(client, aid, phone, user_id))
-    else:
-        asyncio.create_task(poll_sms(bot, chat_id, aid, phone, client))
+    # Checker runs in non-blocking background to avoid delay
+    asyncio.create_task(background_check_and_update(bot, chat_id, msg.message_id, aid, phone, cost_str, client, user_id))
+    # Poller for incoming SMS
+    asyncio.create_task(poll_sms(bot, chat_id, aid, phone, client))
 
     return True
 
@@ -677,7 +682,7 @@ async def cb_refresh_sms(callback: CallbackQuery):
                 row = await db.get_activation(aid)
                 phone = row["phone"] if row else "Unknown"
                 cost_str = row.get("cost") or ""
-                price_tag = f" | {EMOJI_CARD} <code>{cost_str}</code>" if cost_str else ""
+                price_tag = f" | Rate: <code>{cost_str}</code>" if cost_str else ""
                 
                 await callback.message.edit_text(
                     f'{EMOJI_FLAG} Number: <code>+{phone}</code>{price_tag}\n{EMOJI_CARD} OTP: <code>{code}</code>',
@@ -749,15 +754,24 @@ async def process_bulk_amount(message: Message, state: FSMContext):
     client = HeroSMSClient(user["api_key"])
     await message.answer(f'{EMOJI_PLANE} Starting bulk purchase of {amount} numbers...', parse_mode="HTML")
 
+    delivered_count = 0
     for i in range(amount):
         success = await buy_single_number_process(
             message.bot, message.from_user.id, message.chat.id,
             TG_SERVICE, COLOMBIA_ID, client
         )
-        if not success:
-            await message.answer(f"Stopped bulk purchase at item #{i+1}.")
+        if success:
+            delivered_count += 1
+        else:
             break
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.08)
+
+    # Finishing Notification Alert
+    if delivered_count == amount:
+        await message.answer(f"{EMOJI_TICK} <b>Order Completed:</b> Successfully purchased all <b>{delivered_count}/{amount}</b> numbers!", parse_mode="HTML")
+    else:
+        failed_count = amount - delivered_count
+        await message.answer(f"{EMOJI_WARN} <b>Order Finished:</b> Delivered <b>{delivered_count}/{amount}</b> numbers (Stock unavailable or limit reached: {failed_count} failed).", parse_mode="HTML")
 
 @router.message(F.text == "Active Numbers")
 async def text_active_numbers(message: Message):
