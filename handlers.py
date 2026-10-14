@@ -346,7 +346,7 @@ async def handle_herosms_webhook(request):
             cost_str = row.get("cost") or ""
             price_tag = f" | Rate: <code>{cost_str}</code>" if cost_str else ""
             
-            text = f'{EMOJI_FLAG} Number: <code>+{phone}</code>{price_tag}\n{EMOJI_CARD} OTP: <code>{code}</code>'
+            text = f"{EMOJI_FLAG} <b>Number:</b> <code>+{phone}</code> | {EMOJI_CARD} <b>Rate:</b> <code>{cost_str}</code>\n{EMOJI_CARD} <b>OTP:</b> <b>{code}</b>"
             bot = get_bot_instance()
             if bot:
                 try:
@@ -391,7 +391,7 @@ async def poll_sms(bot, chat_id: int, activation_id: str, phone: str, client: He
                     cost_str = row.get("cost") or ""
                     price_tag = f" | Rate: <code>{cost_str}</code>" if cost_str else ""
 
-                    text = f'{EMOJI_FLAG} Number: <code>+{phone}</code>{price_tag}\n{EMOJI_CARD} OTP: <code>{code}</code>'
+                    text = f"{EMOJI_FLAG} <b>Number:</b> <code>+{phone}</code> | {EMOJI_CARD} <b>Rate:</b> <code>{cost_str}</code>\n{EMOJI_CARD} <b>OTP:</b> <b>{code}</b>"
                     msg_id = row["message_id"]
                     if msg_id:
                         await bot.edit_message_text(
